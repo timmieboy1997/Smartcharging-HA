@@ -1,0 +1,197 @@
+blueprint:
+  name: Slimme batterij laadplanning – Frank Energie (v1)
+  description: >
+    Slim thuisbatterij laden op basis van Frank Energie uurprijzen,
+    berekende prijs-gemiddeldes en zonopbrengst.
+    Inclusief Frank-specifieke prijsparser.
+  domain: automation
+
+  input:
+    energy_provider:
+      name: Energieleverancier
+      description: Kies Frank Energie (meer providers in v2)
+      default: "frank"
+      selector:
+        select:
+          options:
+            - frank
+
+    battery_reserve_switch:
+      name: Batterij reserve-modus schakelaar
+        entity:
+          domain: switch
+
+    battery_soc_sensor:
+      name: Batterij SOC sensor (%)
+      selector:
+        entity:
+          domain: sensor
+
+    frank_price_sensor:
+      name: Frank Energie prijs-entiteit
+      description: Sensor met attribute "prices"
+      selector:
+        entity:
+          domain: sensor
+
+    solar_forecast_sensor:
+      name: Verwachte zonopbrengst (kWh)
+      default: ""
+      selector:
+        entity:
+          domain: sensor
+
+    min_solar_day:
+      name: Minimale zon kWh voor dagladen
+      default: 8
+      selector:
+        number:
+          min: 0
+          max: 20
+          step: 0.1
+          unit_of_measurement: "kWh"
+
+    load_start_hour:
+      name: Start uur waarop laden mag
+      default: 0
+      selector:
+        number:
+          min: 0
+          max: 23
+
+    load_end_hour:
+      name: Eind uur waarop laden mag
+      default: 23
+      selector:
+        number:
+          min: 0
+          max: 23
+
+mode: single
+
+variables:
+  energy_provider: !input energy_provider
+  battery_reserve_switch: !input battery_reserve_switch
+  battery_soc_sensor: !input battery_soc_sensor
+  frank_price_sensor: !input frank_price_sensor
+  solar_forecast_sensor: !input solar_forecast_sensor
+  min_solar_day: !input min_solar_day
+  load_start_hour: !input load_start_hour
+  load_end_hour: !input load_end_hour
+
+trigger:
+  - platform: time_pattern
+    minutes: "/5"
+
+###########################################################
+#                    A C T I O N S
+###########################################################
+
+action:
+  - choose:
+      - conditions: "{{ energy_provider == 'frank' }}"
+        sequence:
+          ###########################################################
+          #      FRANK ENERGIE PRIJS-PARSER (regex → JSON)
+          ###########################################################
+          - variables:
+              raw: "{{ state_attr(frank_price_sensor, 'prices') }}"
+              text: "{{ raw | string }}"
+              parsed: >
+                {% set matches = text | regex_findall(
+                  "datetime\\.datetime\\(\\d+, \\d+, \\d+, (\\d+), (\\d+).*?\\).*?"
+                  "datetime\\.datetime\\(\\d+, \\d+, \\d+, (\\d+), (\\d+).*?\\).*?"
+                  "price': ([0-9.]+)"
+                ) %}
+                {%- set out = [] -%}
+                {%- for m in matches -%}
+                  {%- set _ = out.append({
+                    'from_hour': m[0] | int,
+                    'from_minute': m[1] | int,
+                    'till_hour': m[2] | int,
+                    'till_minute': m[3] | int,
+                    'price': m[4] | float
+                  }) -%}
+                {%- endfor -%}
+                {{ out }}
+
+          - variables:
+              prices: "{{ parsed | map(attribute='price') | list }}"
+              avg_day: >
+                {% if prices | length > 0 %}
+                  {{ (prices | sum / prices | length) | round(4) }}
+                {% else %} none
+                {% endif %}
+              avg_night: >
+                {% if prices | length >= 7 %}
+                  {{ (prices[0:7] | sum / 7) | round(4) }}
+                {% else %} none
+                {% endif %}
+              avg_dayblock: >
+                {% if prices | length >= 16 %}
+                  {{ (prices[11:15] | sum / 4) | round(4) }}
+                {% else %} none
+                {% endif %}
+              current_price: "{{ states(frank_price_sensor) | float }}"
+              current_hour: "{{ now().hour }}"
+
+          ###########################################################
+          #              L A A D    L O G I C A
+          ###########################################################
+
+          - choose:
+
+              ####################################################################
+              #                L A D E N   (goedkoop + SOC < 100)
+              ####################################################################
+              - conditions:
+                  - condition: numeric_state
+                    entity_id: !input battery_soc_sensor
+                    below: 100
+
+                  - condition: time
+                    after: "{{ load_start_hour }}:00:00"
+                    before: "{{ load_end_hour }}:00:00"
+
+                  - condition: numeric_state
+                    entity_id: !input solar_forecast_sensor
+                    below: !input min_solar_day
+
+                  - condition: template
+                    value_template: >
+                      {% if current_hour < 7 %}
+                        {{ avg_night != none and current_price < avg_night }}
+                      {% elif current_hour >= 11 and current_hour < 15 %}
+                        {{ avg_dayblock != none and current_price < avg_dayblock }}
+                      {% else %}
+                        {{ avg_day != none and current_price < avg_day }}
+                      {% endif %}
+
+                sequence:
+                  - service: switch.turn_on
+                    target:
+                      entity_id: !input battery_reserve_switch
+
+              ####################################################################
+              #                  S T O P P E N   (duur of vol)
+              ####################################################################
+              - conditions:
+                  - condition: or
+                    conditions:
+                      - condition: numeric_state
+                        entity_id: !input battery_soc_sensor
+                        above: 99
+
+                      - condition: template
+                        value_template: >
+                          {% if current_hour < 7 %}
+                            {{ avg_night != none and current_price >= avg_night }}
+                          {% elif current_hour >= 11 and current_hour < 15 %}
+                            {{ avg_dayblock != none and current_price >= avg_dayblock }}
+                          {% else %}
+                            {{ avg_day != none and current_price >= avg_day }}
+                          {% endif %}
+                sequence:
+                  - service: switch.turn_off
+                    target:
+                      entity_id: !input battery_reserve_switch
