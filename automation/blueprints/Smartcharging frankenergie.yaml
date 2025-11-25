@@ -59,7 +59,9 @@ variables:
 
 trigger:
   - platform: time_pattern
-    minutes: "/5"
+    minutes: "1"
+  - platform: time_pattern
+    minutes: "31"
 
 action:
   - variables:
