@@ -1,12 +1,12 @@
 blueprint:
-  name: "Frank Energie - V22 (Midnight Fix)"
+  name: "Frank Energie - V23 (Syntax Fixed)"
   description: >
-    Opgelost: Problemen met tijdsloten over middernacht (bijv. 21:00 tot 06:00).
+    De foutloze versie.
     
     FIXES:
-    - Midnight Logic: Snapt dat 23:00 in een blok van 21:00-06:00 valt.
-    - Past Filter: Negeert prijzen die in het verleden liggen (zodat je geen oude data gebruikt).
-    - From-Key & UTC correcties inbegrepen.
+    - Opgelost: YAML syntax error in variabelen.
+    - Opgelost: Correcte detectie van tijdsloten over middernacht (bijv. 21:00 - 06:00).
+    - Opgelost: Filtert oude data weg en gebruikt correcte tijdzones.
   domain: automation
   input:
     # --- TIJDSLOTEN ---
@@ -191,34 +191,32 @@ action:
       current_price: "{{ states(frank_price_sensor) | float(0) }}"
       is_boost_active: "{{ boost_switch != [] and is_state(boost_switch, 'on') }}"
 
-      # --- 1. SLIMME TIJDSLOT LOGICA ---
-      # We moeten weten of een slot over middernacht gaat (Start > Eind)
-      ns = night_start.split(':')[0] | int
-      ne = night_end.split(':')[0] | int
-      ds = day_start.split(':')[0] | int
-      de = day_end.split(':')[0] | int
-      
-      night_crosses = (ns > ne)
-      day_crosses = (ds > de)
-      
-      # Huidige tijd check
-      now_h = now().hour
-      
-      # Check of we NU in het nachtblok zitten (rekening houdend met middernacht)
-      is_night_now: >-
-        {% if night_crosses %} {{ now_h >= ns or now_h < ne }}
-        {% else %} {{ now_h >= ns and now_h < ne }}
+      # --- 1. TIJDSLOT LOGICA (SYNTAX FIXED) ---
+      # We berekenen hier of we NU in een geldig slot zitten.
+      is_in_slot: >-
+        {% set now_h = now().hour %}
+        {% set ns = night_start.split(':')[0] | int %}
+        {% set ne = night_end.split(':')[0] | int %}
+        {% set ds = day_start.split(':')[0] | int %}
+        {% set de = day_end.split(':')[0] | int %}
+        
+        {# Nacht logica: Als Start > Eind (bijv 21 > 06), dan is het OF. Anders EN. #}
+        {% if ns > ne %}
+          {% set night_active = (now_h >= ns or now_h < ne) %}
+        {% else %}
+          {% set night_active = (now_h >= ns and now_h < ne) %}
         {% endif %}
-
-      # Check of we NU in het middagblok zitten
-      is_day_now: >-
-        {% if day_crosses %} {{ now_h >= ds or now_h < de }}
-        {% else %} {{ now_h >= ds and now_h < de }}
+        
+        {# Middag logica #}
+        {% if ds > de %}
+          {% set day_active = (now_h >= ds or now_h < de) %}
+        {% else %}
+          {% set day_active = (now_h >= ds and now_h < de) %}
         {% endif %}
-      
-      is_in_slot: "{{ is_night_now or is_day_now }}"
+        
+        {{ night_active or day_active }}
 
-      # --- 2. DATA PARSING (Met Timestamp voor History Filter) ---
+      # --- 2. REGEX MET TIJDZONE CORRECTIE ---
       raw: "{{ state_attr(frank_price_sensor, 'prices') }}"
       prices_json: >-
         {% if raw %}
@@ -247,43 +245,48 @@ action:
           ]
         {% else %} [] {% endif %}
 
-      # --- 3. FILTEREN (FUTURE ONLY & MIDNIGHT AWARE) ---
+      # --- 3. FILTEREN OP HUIDIG SLOT (Always Calc) ---
+      # We filteren de lijst zodat we alleen de prijzen overhouden die relevant zijn voor de ingestelde sloten.
+      # Dit berekent het gemiddelde van de sloten, zelfs als we er nu niet in zitten.
       filtered_data: >-
         {% set output = namespace(list=[], avg=0) %}
         {% set now_ts = as_timestamp(now()) %}
-        
-        {# Buffer van 1 uur in het verleden toestaan (zodat 21:05 nog steeds 21:00 ziet) #}
         {% set history_cutoff = now_ts - 3600 %}
         
         {% if prices_json %}
+           {# Bereken slot grenzen opnieuw binnen dit blok voor veiligheid #}
+           {% set ns = night_start.split(':')[0] | int %}
+           {% set ne = night_end.split(':')[0] | int %}
+           {% set ds = day_start.split(':')[0] | int %}
+           {% set de = day_end.split(':')[0] | int %}
+
            {% for item in prices_json %}
               {% set p_hour = item.local_hour %}
               {% set p_ts = item.ts %}
               {% set p_price = item.price %}
               
-              {# A. FILTER VERLEDEN: Negeer prijzen ouder dan 1 uur geleden #}
+              {# A. FILTER VERLEDEN (ouder dan 1 uur) #}
               {% if p_ts >= history_cutoff %}
               
-                  {# B. FILTER TIJDSLOT: Valt dit uur in Nacht of Middag? #}
+                  {# B. FILTER TIJDSLOT: Hoort dit uur bij een slot? #}
                   {% set in_night = false %}
-                  {% if night_crosses %}
+                  {% if ns > ne %}
                     {% set in_night = (p_hour >= ns or p_hour < ne) %}
                   {% else %}
                     {% set in_night = (p_hour >= ns and p_hour < ne) %}
                   {% endif %}
                   
                   {% set in_day = false %}
-                  {% if day_crosses %}
+                  {% if ds > de %}
                     {% set in_day = (p_hour >= ds or p_hour < de) %}
                   {% else %}
                     {% set in_day = (p_hour >= ds and p_hour < de) %}
                   {% endif %}
 
-                  {# Als het in een geldig slot valt, voeg toe aan de lijst #}
+                  {# Als het geldig is, voeg toe #}
                   {% if in_night or in_day %}
                      {% set output.list = output.list + [p_price] %}
                   {% endif %}
-                  
               {% endif %}
            {% endfor %}
 
