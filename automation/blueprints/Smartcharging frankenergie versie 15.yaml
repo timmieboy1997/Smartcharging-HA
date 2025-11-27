@@ -1,12 +1,14 @@
 blueprint:
-  name: "Frank Energie - V17 (From-Key & UTC Fix)"
+  name: "Frank Energie - V18 (Large Data Fix)"
   description: >
-    Speciaal aangepast voor jouw data-formaat.
+    Opgelost: "Template output exceeded maximum size".
     
-    FIXES:
-    - Ondersteunt de sleutel 'from' (via brackets om syntax error te voorkomen).
-    - Converteert UTC tijden (tzutc) correct naar Lokale Tijd van Home Assistant.
-    - Slim Laden: Boost, Notificaties, BMS, Rendement.
+    Deze versie verwerkt grote datasets direct in het geheugen zonder ze eerst naar tekst te converteren.
+    
+    FUNCTIES:
+    - Werkt met enorme prijs-lijsten (historie).
+    - Correcte 'from' en UTC tijdzone parsing.
+    - Alle slimme functies (Tijdsloten, Boost, Rendement, etc.).
   domain: automation
   input:
     # --- TIJDSLOTEN ---
@@ -197,59 +199,46 @@ action:
       is_day: "{{ now_time >= day_start and now_time < day_end }}"
       is_in_slot: "{{ is_night or is_day }}"
 
-      # --- 2. DATA PARSEN (MET 'FROM' SUPPORT) ---
-      raw_data: "{{ state_attr(frank_price_sensor, 'prices') }}"
-      
+      # --- 2. DATA PROCESSING (MEMORY OPTIMIZED) ---
+      # We halen de data HIER pas op, binnen de set-block.
+      # Hierdoor wordt het niet geconverteerd naar een string variabele die kan crashen.
       filtered_data: >-
         {% set output = namespace(list=[], avg=0) %}
+        {% set raw_data = state_attr(frank_price_sensor, 'prices') %}
         
-        {# We checken of er data is #}
-        {% if raw_data and raw_data is iterable %}
+        {# Alleen verwerken als er data is en we in een slot zitten #}
+        {% if raw_data and raw_data is iterable and is_in_slot %}
            
-           {# Converteer tijdsloten naar integers #}
            {% set ns = night_start.split(':')[0] | int %}
            {% set ne = night_end.split(':')[0] | int %}
            {% set ds = day_start.split(':')[0] | int %}
            {% set de = day_end.split(':')[0] | int %}
 
            {% for item in raw_data %}
-              {# PRIJS OPHALEN #}
+              {# PRIJS #}
               {% set p_val = item.price | default(item.market_price) | default(item.value) | default(none) %}
               
-              {# TIJD OPHALEN & CONVERTEREN NAAR LOKAAL UUR #}
+              {# TIJD (UTC CORRECTIE) #}
               {% set p_hour = none %}
-              
-              {# Hier gebruiken we de brackets ['from'] omdat 'from' een keyword is #}
               {% if item['from'] is defined %}
-                 {# as_timestamp converteert UTC object automatisch naar lokale tijd van je HA installatie #}
                  {% set p_hour = as_timestamp(item['from']) | timestamp_custom('%H') | int %}
-              
               {% elif item.start_time is defined %}
                  {% set p_hour = as_timestamp(item.start_time) | timestamp_custom('%H') | int %}
-              
               {% elif item.date is defined %}
                  {% set p_hour = as_timestamp(item.date) | timestamp_custom('%H') | int %}
               {% endif %}
 
-              {# FILTEREN #}
+              {# FILTER #}
               {% if p_val is not none and p_hour is not none %}
                  {% set p_val = p_val | float %}
-                 
-                 {# Als we in een tijdslot zitten, filter strikt op dat slot #}
-                 {% if is_in_slot %}
-                    {% if is_night and (p_hour >= ns and p_hour < ne) %}
-                        {% set output.list = output.list + [p_val] %}
-                    {% elif is_day and (p_hour >= ds and p_hour < de) %}
-                        {% set output.list = output.list + [p_val] %}
-                    {% endif %}
-                 {% else %}
-                    {# Als we NIET in een tijdslot zitten (bijv 20:00 uur), #}
-                    {# laat de lijst dan leeg, want we willen nu niet laden. #}
+                 {% if is_night and (p_hour >= ns and p_hour < ne) %}
+                    {% set output.list = output.list + [p_val] %}
+                 {% elif is_day and (p_hour >= ds and p_hour < de) %}
+                    {% set output.list = output.list + [p_val] %}
                  {% endif %}
               {% endif %}
            {% endfor %}
 
-           {# Gemiddelde berekenen #}
            {% if output.list | length > 0 %}
               {% set output.avg = (output.list | sum / output.list | length) %}
            {% endif %}
