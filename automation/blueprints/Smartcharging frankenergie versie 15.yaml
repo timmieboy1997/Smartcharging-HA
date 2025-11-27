@@ -1,12 +1,12 @@
 blueprint:
-  name: Frank Energie - V15 (Parsing Fix)
+  name: "Frank Energie - V16 (Universal Reader)"
   description: >
-    Combinatie van de originele (werkende) prijs-lezer en de nieuwe slimme functies.
+    De definitieve oplossing voor het inlezen van prijzen.
     
-    FUNCTIES:
-    - Gebruikt de originele regex parsing (werkt met datetime objecten).
-    - Laadt alleen binnen ingestelde tijdsloten (Nacht/Middag).
-    - Boost, Notificaties, BMS Vertraging, Rendementscheck & Seizoensdoelen.
+    VERBETERING:
+    - Leest de 'prices' attribuut direct als lijst (zoals Apex dat doet).
+    - Werkt met zowel 'from_hour' (oude stijl) als ISO timestamps (nieuwe stijl).
+    - Inclusief alle slimme functies (Tijdsloten, Boost, Rendement, etc.).
   domain: automation
   input:
     # --- TIJDSLOTEN ---
@@ -45,6 +45,7 @@ blueprint:
           device_class: battery
     frank_price_sensor:
       name: "Sensor: Frank Energie Prijzen"
+      description: "De sensor die de attribuut 'prices' of 'forecast' bevat."
       selector:
         entity:
           domain: sensor
@@ -52,7 +53,6 @@ blueprint:
     # --- BOOST & NOTIFICATIES ---
     boost_switch:
       name: "Optie: Boost Schakelaar"
-      description: "Zet AAN om direct te laden."
       default: []
       selector:
         entity:
@@ -141,6 +141,8 @@ blueprint:
           min: 0
           max: 2.0
           step: 0.01
+          mode: box
+          unit_of_measurement: "€"
     emergency_soc:
       name: "Nood SoC (%)"
       default: 10
@@ -148,6 +150,7 @@ blueprint:
         number:
           min: 0
           max: 100
+          unit_of_measurement: "%"
 
 variables:
   # Inputs
@@ -189,63 +192,62 @@ action:
       current_price: "{{ states(frank_price_sensor) | float(0) }}"
       is_boost_active: "{{ boost_switch != [] and is_state(boost_switch, 'on') }}"
 
-      # --- 1. TIJDSLOTEN BEPALEN ---
+      # --- 1. TIJDSLOTEN ---
       now_time: "{{ now().strftime('%H:%M:%S') }}"
       is_night: "{{ now_time >= night_start and now_time < night_end }}"
       is_day: "{{ now_time >= day_start and now_time < day_end }}"
       is_in_slot: "{{ is_night or is_day }}"
 
-      # --- 2. COMPLEXE PARSING (JOUW ORIGINELE CODE) ---
-      raw: "{{ state_attr(frank_price_sensor, 'prices') }}"
-      prices_json: >-
-        {% if raw %}
-          {% set text = raw | string %}
-          {% set matches = text | regex_findall(
-            "datetime\\.datetime\\(\\d+, \\d+, \\d+, (\\d+), (\\d+).*?\\).*?"
-            "datetime\\.datetime\\(\\d+, \\d+, \\d+, (\\d+), (\\d+).*?\\).*?"
-            "price': ([0-9.]+)"
-          ) %}
-          [
-          {%- for m in matches %}
-            {
-              "from_hour": {{ m[0]|int }},
-              "from_minute": {{ m[1]|int }},
-              "till_hour": {{ m[2]|int }},
-              "till_minute": {{ m[3]|int }},
-              "price": {{ m[4]|float }}
-            }{{ "," if not loop.last }}
-          {%- endfor %}
-          ]
-        {% else %} [] {% endif %}
-
-      # --- 3. FILTEREN OP HUIDIG SLOT ---
-      # Nu gebruiken we de 'prices_json' die we hierboven hebben gemaakt
-      # en filteren we die op basis van de nacht/middag sloten.
+      # --- 2. DE NIEUWE UNIVERSELE LEZER ---
+      # Haal de ruwe data op (dit is vaak een lijst met objecten)
+      raw_data: "{{ state_attr(frank_price_sensor, 'prices') }}"
+      
       filtered_data: >-
         {% set output = namespace(list=[], avg=0) %}
         
-        {# Alleen doorgaan als we in een tijdslot zitten en er data is #}
-        {% if prices_json and is_in_slot %}
+        {# Check of de data bestaat en een lijst is #}
+        {% if raw_data and raw_data is iterable and is_in_slot %}
            
-           {# Converteer tijden naar integers #}
+           {# Converteer tijdslot grenzen naar integers (uren) #}
            {% set ns = night_start.split(':')[0] | int %}
            {% set ne = night_end.split(':')[0] | int %}
            {% set ds = day_start.split(':')[0] | int %}
            {% set de = day_end.split(':')[0] | int %}
 
-           {% for item in prices_json %}
-              {% set p_hour = item.from_hour %}
-              {% set p_price = item.price %}
+           {% for item in raw_data %}
+              {# PROBEER PRIJS TE VINDEN (Verschillende integraties gebruiken andere namen) #}
+              {% set p_val = item.price | default(item.market_price) | default(item.value) | default(item.price_with_tax) | default(none) %}
               
-              {# Is dit uur onderdeel van het huidige actieve blok? #}
-              {% if is_night and (p_hour >= ns and p_hour < ne) %}
-                 {% set output.list = output.list + [p_price] %}
-              {% elif is_day and (p_hour >= ds and p_hour < de) %}
-                 {% set output.list = output.list + [p_price] %}
+              {# PROBEER UUR TE VINDEN #}
+              {% set p_hour = none %}
+              
+              {# Optie A: Ouderwets 'from_hour' veld #}
+              {% if item.from_hour is defined %}
+                 {% set p_hour = item.from_hour | int %}
+              
+              {# Optie B: ISO Timestamp (start_time / from / date) #}
+              {% elif item.start_time is defined %}
+                 {% set p_hour = as_timestamp(item.start_time) | timestamp_custom('%H') | int %}
+              {% elif item.start is defined %}
+                 {% set p_hour = as_timestamp(item.start) | timestamp_custom('%H') | int %}
+              {% elif item.date is defined %}
+                 {% set p_hour = as_timestamp(item.date) | timestamp_custom('%H') | int %}
+              {% endif %}
+
+              {# ALS we een prijs én een uur hebben gevonden, pas filter toe #}
+              {% if p_val is not none and p_hour is not none %}
+                 {% set p_val = p_val | float %}
+                 
+                 {# FILTER: Zit dit uur in het huidige actieve blok? #}
+                 {% if is_night and (p_hour >= ns and p_hour < ne) %}
+                    {% set output.list = output.list + [p_val] %}
+                 {% elif is_day and (p_hour >= ds and p_hour < de) %}
+                    {% set output.list = output.list + [p_val] %}
+                 {% endif %}
               {% endif %}
            {% endfor %}
-           
-           {# Bereken gemiddelde van dit specifieke blok #}
+
+           {# Bereken gemiddelde #}
            {% if output.list | length > 0 %}
               {% set output.avg = (output.list | sum / output.list | length) %}
            {% endif %}
@@ -253,11 +255,12 @@ action:
         
         {"list": {{ output.list }}, "avg": {{ output.avg }}}
 
+      # De rest van de logica blijft hetzelfde, maar werkt nu met correcte data
       sorted_prices: "{{ filtered_data.list | sort }}"
       avg_price: "{{ filtered_data.avg }}"
       profit_price_limit: "{{ avg_price * (1 - (min_profit_margin / 100)) }}"
 
-      # --- 4. ZON & DOEL ---
+      # --- 3. ZON & DOEL ---
       forecast_tomorrow_val: "{{ states(solar_forecast_tomorrow) | float(0) }}"
       relevant_solar: >-
         {% if now().hour >= 14 %} {{ forecast_tomorrow_val }}
@@ -268,7 +271,7 @@ action:
         {% else %} {{ target_soc_winter }}
         {% endif %}
 
-      # --- 5. UREN BEREKENEN ---
+      # --- 4. UREN BEREKENEN ---
       hours_calc: >-
         {% set soc_deficit = dynamic_target_soc - current_soc %}
         {% if soc_deficit > 0 %}
@@ -282,7 +285,7 @@ action:
       hours_strict: "{{ hours_calc.strict }}"
       hours_safe: "{{ hours_calc.safe }}"
 
-      # --- 6. DREMPELS ---
+      # --- 5. DREMPELS ---
       threshold_strict: >-
         {% if sorted_prices | length > 0 and hours_strict > 0 %}
            {% set idx = (hours_strict - 1) if (hours_strict - 1) < sorted_prices|length else (sorted_prices|length - 1) %}
