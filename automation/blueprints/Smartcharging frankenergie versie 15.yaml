@@ -1,14 +1,36 @@
 blueprint:
-  name: "Frank Energie - V23 (Syntax Fixed)"
+  name: "Frank Energie - V25 (Ochtend & Avond Update)"
   description: >
-    De foutloze versie.
+    De meest complete versie.
     
-    FIXES:
-    - Opgelost: YAML syntax error in variabelen.
-    - Opgelost: Correcte detectie van tijdsloten over middernacht (bijv. 21:00 - 06:00).
-    - Opgelost: Filtert oude data weg en gebruikt correcte tijdzones.
+    NIEUW:
+    - Twee rapportagemomenten: Ochtend (voor de dag) en Avond (voor de nacht).
+    - Slimme weergave in bericht ("Vandaag 13:00" vs "Morgen 02:00").
+    
+    STANDAARD FUNCTIES:
+    - Regex Fix, Tijdzones, Tijdsloten, Boost, BMS & Rendement.
   domain: automation
   input:
+    # --- RAPPORTAGE ---
+    report_time_evening:
+      name: "Tijdstip Avond Rapport"
+      description: "Voor de nachtplanning (bijv. 21:30)."
+      default: "21:30:00"
+      selector:
+        time:
+    report_time_morning:
+      name: "Tijdstip Ochtend Rapport"
+      description: "Voor de middagplanning (bijv. 08:00)."
+      default: "08:00:00"
+      selector:
+        time:
+    notify_device:
+      name: "Telefoon voor meldingen"
+      description: "Hierop ontvang je de rapporten."
+      selector:
+        device:
+          integration: mobile_app
+
     # --- TIJDSLOTEN ---
     night_start:
       name: "Starttijd Nachtladen"
@@ -49,19 +71,13 @@ blueprint:
         entity:
           domain: sensor
 
-    # --- BOOST & NOTIFICATIES ---
+    # --- BOOST ---
     boost_switch:
       name: "Optie: Boost Schakelaar"
       default: []
       selector:
         entity:
           domain: input_boolean
-    notify_device:
-      name: "Optie: Telefoon voor meldingen"
-      default: []
-      selector:
-        device:
-          integration: mobile_app
 
     # --- ZON & SEIZOEN ---
     solar_forecast_today:
@@ -86,7 +102,8 @@ blueprint:
     # --- RENDEMENT & DOELEN ---
     min_profit_margin:
       name: "Minimale Winstmarge (%)"
-      default: 20
+      description: "Zet op 5-10% voor zekerheid, 20% voor max rendement."
+      default: 10
       selector:
         number:
           min: 0
@@ -158,6 +175,8 @@ variables:
   frank_price_sensor: !input frank_price_sensor
   boost_switch: !input boost_switch
   notify_device: !input notify_device
+  report_time_evening: !input report_time_evening
+  report_time_morning: !input report_time_morning
   # Tijdsloten
   night_start: !input night_start
   night_end: !input night_end
@@ -179,11 +198,20 @@ variables:
 trigger:
   - platform: time_pattern
     minutes: "/5"
+    id: "timer"
+  - platform: time
+    at: !input report_time_evening
+    id: "report"
+  - platform: time
+    at: !input report_time_morning
+    id: "report"
   - platform: state
     entity_id: !input frank_price_sensor
+    id: "price_change"
   - platform: state
     entity_id: !input boost_switch
     to: "on"
+    id: "boost"
 
 action:
   - variables:
@@ -191,8 +219,7 @@ action:
       current_price: "{{ states(frank_price_sensor) | float(0) }}"
       is_boost_active: "{{ boost_switch != [] and is_state(boost_switch, 'on') }}"
 
-      # --- 1. TIJDSLOT LOGICA (SYNTAX FIXED) ---
-      # We berekenen hier of we NU in een geldig slot zitten.
+      # --- 1. TIJDSLOT LOGICA ---
       is_in_slot: >-
         {% set now_h = now().hour %}
         {% set ns = night_start.split(':')[0] | int %}
@@ -200,23 +227,17 @@ action:
         {% set ds = day_start.split(':')[0] | int %}
         {% set de = day_end.split(':')[0] | int %}
         
-        {# Nacht logica: Als Start > Eind (bijv 21 > 06), dan is het OF. Anders EN. #}
-        {% if ns > ne %}
-          {% set night_active = (now_h >= ns or now_h < ne) %}
-        {% else %}
-          {% set night_active = (now_h >= ns and now_h < ne) %}
+        {% if ns > ne %} {% set night_active = (now_h >= ns or now_h < ne) %}
+        {% else %}       {% set night_active = (now_h >= ns and now_h < ne) %}
         {% endif %}
         
-        {# Middag logica #}
-        {% if ds > de %}
-          {% set day_active = (now_h >= ds or now_h < de) %}
-        {% else %}
-          {% set day_active = (now_h >= ds and now_h < de) %}
+        {% if ds > de %} {% set day_active = (now_h >= ds or now_h < de) %}
+        {% else %}       {% set day_active = (now_h >= ds and now_h < de) %}
         {% endif %}
         
         {{ night_active or day_active }}
 
-      # --- 2. REGEX MET TIJDZONE CORRECTIE ---
+      # --- 2. DATA PARSING ---
       raw: "{{ state_attr(frank_price_sensor, 'prices') }}"
       prices_json: >-
         {% if raw %}
@@ -232,12 +253,11 @@ action:
             {% set h = m[3]|int %}
             {% set mn = m[4]|int %}
             {% set price = m[5]|float %}
-            
             {% set iso_utc = "%04d-%02d-%02dT%02d:%02d:00+00:00" | format(y, mo, d, h, mn) %}
             {% set local_dt = iso_utc | as_datetime | as_local %}
-            
             {
               "local_hour": {{ local_dt.hour }},
+              "day_str": "{{ 'Vandaag' if local_dt.date() == now().date() else 'Morgen' }}",
               "ts": {{ as_timestamp(local_dt) }},
               "price": {{ price }}
             }{{ "," if not loop.last }}
@@ -245,16 +265,13 @@ action:
           ]
         {% else %} [] {% endif %}
 
-      # --- 3. FILTEREN OP HUIDIG SLOT (Always Calc) ---
-      # We filteren de lijst zodat we alleen de prijzen overhouden die relevant zijn voor de ingestelde sloten.
-      # Dit berekent het gemiddelde van de sloten, zelfs als we er nu niet in zitten.
+      # --- 3. FILTEREN (ALWAYS ON) ---
       filtered_data: >-
-        {% set output = namespace(list=[], avg=0) %}
+        {% set output = namespace(list=[], avg=0, valid_items=[]) %}
         {% set now_ts = as_timestamp(now()) %}
         {% set history_cutoff = now_ts - 3600 %}
         
         {% if prices_json %}
-           {# Bereken slot grenzen opnieuw binnen dit blok voor veiligheid #}
            {% set ns = night_start.split(':')[0] | int %}
            {% set ne = night_end.split(':')[0] | int %}
            {% set ds = day_start.split(':')[0] | int %}
@@ -263,29 +280,21 @@ action:
            {% for item in prices_json %}
               {% set p_hour = item.local_hour %}
               {% set p_ts = item.ts %}
-              {% set p_price = item.price %}
               
-              {# A. FILTER VERLEDEN (ouder dan 1 uur) #}
               {% if p_ts >= history_cutoff %}
-              
-                  {# B. FILTER TIJDSLOT: Hoort dit uur bij een slot? #}
                   {% set in_night = false %}
-                  {% if ns > ne %}
-                    {% set in_night = (p_hour >= ns or p_hour < ne) %}
-                  {% else %}
-                    {% set in_night = (p_hour >= ns and p_hour < ne) %}
+                  {% if ns > ne %} {% set in_night = (p_hour >= ns or p_hour < ne) %}
+                  {% else %}       {% set in_night = (p_hour >= ns and p_hour < ne) %}
                   {% endif %}
                   
                   {% set in_day = false %}
-                  {% if ds > de %}
-                    {% set in_day = (p_hour >= ds or p_hour < de) %}
-                  {% else %}
-                    {% set in_day = (p_hour >= ds and p_hour < de) %}
+                  {% if ds > de %} {% set in_day = (p_hour >= ds or p_hour < de) %}
+                  {% else %}       {% set in_day = (p_hour >= ds and p_hour < de) %}
                   {% endif %}
 
-                  {# Als het geldig is, voeg toe #}
                   {% if in_night or in_day %}
-                     {% set output.list = output.list + [p_price] %}
+                     {% set output.list = output.list + [item.price] %}
+                     {% set output.valid_items = output.valid_items + [item] %}
                   {% endif %}
               {% endif %}
            {% endfor %}
@@ -295,7 +304,7 @@ action:
            {% endif %}
         {% endif %}
         
-        {"list": {{ output.list }}, "avg": {{ output.avg }}}
+        {"list": {{ output.list }}, "avg": {{ output.avg }}, "items": {{ output.valid_items }}}
 
       sorted_prices: "{{ filtered_data.list | sort }}"
       avg_price: "{{ filtered_data.avg }}"
@@ -312,7 +321,7 @@ action:
         {% else %} {{ target_soc_winter }}
         {% endif %}
 
-      # --- 5. UREN BEREKENEN ---
+      # --- 5. UREN ---
       hours_calc: >-
         {% set soc_deficit = dynamic_target_soc - current_soc %}
         {% if soc_deficit > 0 %}
@@ -340,28 +349,60 @@ action:
         {% else %} -999 {% endif %}
 
   - choose:
-      # SCENARIO 1: BOOST
+      # --- RAPPORTAGE TRIGGER ---
       - conditions:
-          - condition: template
-            value_template: "{{ is_boost_active }}"
+          - condition: trigger
+            id: "report"
         sequence:
           - if:
               - condition: template
-                value_template: "{{ is_state(battery_reserve_switch, 'off') }}"
+                value_template: "{{ notify_device != [] }}"
             then:
-              - service: switch.turn_on
-                target:
-                  entity_id: !input battery_reserve_switch
-              - if:
-                  - condition: template
-                    value_template: "{{ notify_device != [] }}"
-                then:
-                  - domain: mobile_app
-                    type: notify
-                    device_id: !input notify_device
-                    message: "🚀 Boost geactiveerd!"
+              - domain: mobile_app
+                type: notify
+                device_id: !input notify_device
+                message: >-
+                  📊 **Batterij Laadplan**
+                  
+                  🔋 **Status**
+                  Huidig: {{ current_soc }}%
+                  Doel: {{ dynamic_target_soc }}%
+                  Nodig: {{ hours_strict }}u (Strikt) | {{ hours_safe }}u (Buffer)
+                  
+                  💰 **Financieel**
+                  Gemiddelde: €{{ avg_price | round(3) }}
+                  Strikt (<): €{{ threshold_strict | round(3) }}
+                  Buffer (<): €{{ profit_price_limit | round(3) }}
+                  
+                  🕒 **Verwachte Starttijden**
+                  {%- set ns_list = namespace(found=[]) %}
+                  {%- for item in filtered_data.items %}
+                    {%- if item.price <= threshold_strict %}
+                      {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (€" ~ item.price|round(3) ~ ")"] %}
+                    {%- elif item.price <= threshold_safe and item.price < profit_price_limit %}
+                      {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (Buffer)"] %}
+                    {%- endif %}
+                  {%- endfor %}
+                  {{ ns_list.found | join('\n') if ns_list.found else "Geen geschikte uren gevonden." }}
 
-      # SCENARIO 2: NOOD
+      # --- BOOST ---
+      - conditions:
+          - condition: trigger
+            id: "boost"
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input battery_reserve_switch
+          - if:
+              - condition: template
+                value_template: "{{ notify_device != [] }}"
+            then:
+              - domain: mobile_app
+                type: notify
+                device_id: !input notify_device
+                message: "🚀 Boost geactiveerd!"
+
+      # --- NOOD ---
       - conditions:
           - condition: template
             value_template: "{{ current_soc < emergency_soc }}"
@@ -384,13 +425,13 @@ action:
                     device_id: !input notify_device
                     message: "⚠️ Noodlading gestart."
 
-      # SCENARIO 3: SLIM LADEN
+      # --- SLIM LADEN ---
       - conditions:
-          # A: Binnen Tijdslot (Nu met correcte Midnight Logic)
+          # Check A: Zitten we in het tijdslot?
           - condition: template
             value_template: "{{ is_in_slot }}"
           
-          # B: Prijscondities
+          # Check B: Prijzen
           - condition: or
             conditions:
               - condition: template
@@ -402,7 +443,7 @@ action:
                   - condition: template
                     value_template: "{{ current_price < profit_price_limit }}"
           
-          # C: Veiligheid
+          # Check C: Veiligheid
           - condition: template
             value_template: "{{ current_price < max_price_cap }}"
           - condition: template
@@ -424,11 +465,9 @@ action:
                     device_id: !input notify_device
                     message: >-
                       🔋 Slim laden gestart! 
-                      Prijs: €{{ current_price | round(3) }}.
-                      Blokgemiddelde: €{{ avg_price | round(3) }}.
-                      Doel: {{ dynamic_target_soc }}%.
+                      Prijs: €{{ current_price | round(3) }}
 
-      # SCENARIO 4: STOPPEN
+      # --- STOPPEN ---
       - conditions:
           - condition: template
             value_template: "{{ is_state(battery_reserve_switch, 'on') }}"
