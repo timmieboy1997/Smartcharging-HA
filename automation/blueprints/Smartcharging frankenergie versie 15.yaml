@@ -1,14 +1,16 @@
 blueprint:
-  name: "Frank Energie - V25 (Ochtend & Avond Update)"
+  name: "Frank Energie - V27 (Final Fix)"
   description: >
-    De meest complete versie.
+    De definitieve versie.
     
-    NIEUW:
-    - Twee rapportagemomenten: Ochtend (voor de dag) en Avond (voor de nacht).
-    - Slimme weergave in bericht ("Vandaag 13:00" vs "Morgen 02:00").
+    OPGELOST:
+    - Foutmelding bij notificaties (variable conflict).
+    - Crash bij lege prijslijsten.
+    - Tijdzone en Tijdslot logica.
     
-    STANDAARD FUNCTIES:
-    - Regex Fix, Tijdzones, Tijdsloten, Boost, BMS & Rendement.
+    FUNCTIES:
+    - Ochtend & Avond rapportage.
+    - Boost, Noodladen, Seizoensdoelen & Rendementscheck.
   domain: automation
   input:
     # --- RAPPORTAGE ---
@@ -26,7 +28,8 @@ blueprint:
         time:
     notify_device:
       name: "Telefoon voor meldingen"
-      description: "Hierop ontvang je de rapporten."
+      description: "Hierop ontvang je de rapporten en start-meldingen."
+      default: []
       selector:
         device:
           integration: mobile_app
@@ -34,6 +37,7 @@ blueprint:
     # --- TIJDSLOTEN ---
     night_start:
       name: "Starttijd Nachtladen"
+      description: "Lokale tijd."
       default: "00:00:00"
       selector:
         time:
@@ -74,6 +78,7 @@ blueprint:
     # --- BOOST ---
     boost_switch:
       name: "Optie: Boost Schakelaar"
+      description: "Zet AAN om direct te laden (negeert alles)."
       default: []
       selector:
         entity:
@@ -92,6 +97,7 @@ blueprint:
           domain: sensor
     summer_solar_threshold:
       name: "Drempel Zonnige Dag (kWh)"
+      description: "Boven deze waarde laden we minder vol (zomermodus)."
       default: 15
       selector:
         number:
@@ -102,7 +108,7 @@ blueprint:
     # --- RENDEMENT & DOELEN ---
     min_profit_margin:
       name: "Minimale Winstmarge (%)"
-      description: "Zet op 5-10% voor zekerheid, 20% voor max rendement."
+      description: "Buffer-uren worden alleen geladen als ze X% goedkoper zijn dan gemiddeld."
       default: 10
       selector:
         number:
@@ -135,6 +141,7 @@ blueprint:
           step: 0.1
     charge_power_kw:
       name: "Laadsnelheid (kW)"
+      description: "Gebruik je gemiddelde laadsnelheid."
       default: 3.0
       selector:
         number:
@@ -143,6 +150,7 @@ blueprint:
           step: 0.1
     safety_factor:
       name: "BMS Vertragingsfactor"
+      description: "1.5 = 50% extra tijd reserveren voor trage batterij."
       default: 1.5
       selector:
         number:
@@ -219,7 +227,7 @@ action:
       current_price: "{{ states(frank_price_sensor) | float(0) }}"
       is_boost_active: "{{ boost_switch != [] and is_state(boost_switch, 'on') }}"
 
-      # --- 1. TIJDSLOT LOGICA ---
+      # --- 1. TIJDSLOT LOGICA (MIDNIGHT AWARE) ---
       is_in_slot: >-
         {% set now_h = now().hour %}
         {% set ns = night_start.split(':')[0] | int %}
@@ -227,21 +235,24 @@ action:
         {% set ds = day_start.split(':')[0] | int %}
         {% set de = day_end.split(':')[0] | int %}
         
+        {# Nacht logica: Als Start > Eind (21>06), gebruik OF. Anders EN. #}
         {% if ns > ne %} {% set night_active = (now_h >= ns or now_h < ne) %}
         {% else %}       {% set night_active = (now_h >= ns and now_h < ne) %}
         {% endif %}
         
+        {# Middag logica #}
         {% if ds > de %} {% set day_active = (now_h >= ds or now_h < de) %}
         {% else %}       {% set day_active = (now_h >= ds and now_h < de) %}
         {% endif %}
         
         {{ night_active or day_active }}
 
-      # --- 2. DATA PARSING ---
+      # --- 2. DATA PARSEN (REGEX) ---
       raw: "{{ state_attr(frank_price_sensor, 'prices') }}"
       prices_json: >-
         {% if raw %}
           {% set text = raw | string %}
+          {# Regex leest datetime objecten #}
           {% set matches = text | regex_findall(
             "datetime\\.datetime\\((\\d+), (\\d+), (\\d+), (\\d+), (\\d+).*?price': ([0-9.]+)"
           ) %}
@@ -253,8 +264,11 @@ action:
             {% set h = m[3]|int %}
             {% set mn = m[4]|int %}
             {% set price = m[5]|float %}
+            
+            {# Maak ISO string voor juiste tijdzone conversie #}
             {% set iso_utc = "%04d-%02d-%02dT%02d:%02d:00+00:00" | format(y, mo, d, h, mn) %}
             {% set local_dt = iso_utc | as_datetime | as_local %}
+            
             {
               "local_hour": {{ local_dt.hour }},
               "day_str": "{{ 'Vandaag' if local_dt.date() == now().date() else 'Morgen' }}",
@@ -265,9 +279,9 @@ action:
           ]
         {% else %} [] {% endif %}
 
-      # --- 3. FILTEREN (ALWAYS ON) ---
+      # --- 3. FILTEREN (CRASH PROOF) ---
       filtered_data: >-
-        {% set output = namespace(list=[], avg=0, valid_items=[]) %}
+        {% set output = namespace(price_list=[], avg=0, slot_data=[]) %}
         {% set now_ts = as_timestamp(now()) %}
         {% set history_cutoff = now_ts - 3600 %}
         
@@ -281,7 +295,10 @@ action:
               {% set p_hour = item.local_hour %}
               {% set p_ts = item.ts %}
               
+              {# A. Filter Verleden #}
               {% if p_ts >= history_cutoff %}
+                  
+                  {# B. Filter Tijdslot (met Midnight support) #}
                   {% set in_night = false %}
                   {% if ns > ne %} {% set in_night = (p_hour >= ns or p_hour < ne) %}
                   {% else %}       {% set in_night = (p_hour >= ns and p_hour < ne) %}
@@ -292,20 +309,26 @@ action:
                   {% else %}       {% set in_day = (p_hour >= ds and p_hour < de) %}
                   {% endif %}
 
+                  {# C. Toevoegen als geldig #}
                   {% if in_night or in_day %}
-                     {% set output.list = output.list + [item.price] %}
-                     {% set output.valid_items = output.valid_items + [item] %}
+                     {% set output.price_list = output.price_list + [item.price] %}
+                     {% set output.slot_data = output.slot_data + [item] %}
                   {% endif %}
               {% endif %}
            {% endfor %}
 
-           {% if output.list | length > 0 %}
-              {% set output.avg = (output.list | sum / output.list | length) %}
+           {# D. CRASH FIX: Voorkom delen door nul #}
+           {% if output.price_list | length > 0 %}
+              {% set output.avg = (output.price_list | sum / output.price_list | length) %}
+           {% else %}
+              {% set output.avg = 999.0 %}
            {% endif %}
         {% endif %}
         
-        {"list": {{ output.list }}, "avg": {{ output.avg }}, "items": {{ output.valid_items }}}
+        {# Gebruik nieuwe variabelenamen om conflicten te voorkomen #}
+        {"list": {{ output.price_list }}, "avg": {{ output.avg }}, "slot_data": {{ output.slot_data }}}
 
+      # Variabelen
       sorted_prices: "{{ filtered_data.list | sort }}"
       avg_price: "{{ filtered_data.avg }}"
       profit_price_limit: "{{ avg_price * (1 - (min_profit_margin / 100)) }}"
@@ -370,13 +393,14 @@ action:
                   Nodig: {{ hours_strict }}u (Strikt) | {{ hours_safe }}u (Buffer)
                   
                   💰 **Financieel**
+                  {% if sorted_prices | length > 0 %}
                   Gemiddelde: €{{ avg_price | round(3) }}
                   Strikt (<): €{{ threshold_strict | round(3) }}
                   Buffer (<): €{{ profit_price_limit | round(3) }}
                   
                   🕒 **Verwachte Starttijden**
                   {%- set ns_list = namespace(found=[]) %}
-                  {%- for item in filtered_data.items %}
+                  {%- for item in filtered_data.slot_data %}
                     {%- if item.price <= threshold_strict %}
                       {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (€" ~ item.price|round(3) ~ ")"] %}
                     {%- elif item.price <= threshold_safe and item.price < profit_price_limit %}
@@ -384,6 +408,9 @@ action:
                     {%- endif %}
                   {%- endfor %}
                   {{ ns_list.found | join('\n') if ns_list.found else "Geen geschikte uren gevonden." }}
+                  {% else %}
+                  ⛔ Geen komende laad-uren meer beschikbaar in de data.
+                  {% endif %}
 
       # --- BOOST ---
       - conditions:
