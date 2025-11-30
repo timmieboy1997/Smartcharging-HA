@@ -1,44 +1,75 @@
 blueprint:
-  name: "Frank Energie - V40 (Device Selector)"
+  name: "Frank Energie - V36 (New Integration Fix)"
   description: >
-    De ultieme versie met gebruiksvriendelijke notificaties.
+    Aangepast voor de nieuwe integratie.
     
-    HERSTELD:
-    - Je kunt je telefoon weer gewoon selecteren uit een lijst (geen typwerk meer).
+    FIX:
+    - Tijdzone correctie verwijderd. We nemen de tijd uit de sensor nu 1-op-1 over.
+    - Dit lost het probleem op dat uren +1 vooruit liepen.
     
-    BEHOUDEN:
-    - Smart Holding (batterij vasthouden voor winst).
-    - Ochtend Garantie (nooit leeg wakker worden).
-    - Price Spike Protection (direct stoppen bij hoge prijs).
+    BEVAT NOG STEEDS:
+    - EEPROM Bescherming (30 min draaien), Ochtend Garantie, Tijdsloten, etc.
   domain: automation
   input:
-    # --- 1. NOTIFICATIES (HERSTELD) ---
-    notify_device:
-      name: "Telefoon voor meldingen"
-      description: "Selecteer het apparaat waar de rapporten heen moeten."
-      default: []
-      selector:
-        device:
-          integration: mobile_app
+    # --- RAPPORTAGE ---
     report_time_evening:
-      name: "Tijdstip: Avond Rapport"
+      name: "Tijdstip Avond Rapport"
       default: "21:30:00"
       selector:
         time:
     report_time_morning:
-      name: "Tijdstip: Ochtend Rapport"
+      name: "Tijdstip Ochtend Rapport"
       default: "08:00:00"
       selector:
         time:
+    notify_service_name:
+      name: "Notificatie Service"
+      description: "Bijv: notify.mobile_app_jouw_naam"
+      default: ""
+      selector:
+        text:
 
-    # --- 2. DE BASIS ---
+    # --- OCHTEND GARANTIE ---
+    target_soc_morning_min:
+      name: "Minimale Ochtendbuffer (%)"
+      description: "Forceert laden 's nachts tot dit niveau."
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+
+    # --- TIJDSLOTEN ---
+    night_start:
+      name: "Starttijd Nachtladen"
+      default: "00:00:00"
+      selector:
+        time:
+    night_end:
+      name: "Eindtijd Nachtladen"
+      default: "06:00:00"
+      selector:
+        time:
+    day_start:
+      name: "Starttijd Middagladen"
+      default: "12:00:00"
+      selector:
+        time:
+    day_end:
+      name: "Eindtijd Middagladen"
+      default: "15:00:00"
+      selector:
+        time:
+
+    # --- BASIS ENTITEITEN ---
     battery_reserve_switch:
       name: "Schakelaar: Geforceerd Laden"
       selector:
         entity:
           domain: switch
     battery_soc_sensor:
-      name: "Sensor: Batterij Percentage"
+      name: "Sensor: Batterij SoC (%)"
       selector:
         entity:
           domain: sensor
@@ -48,79 +79,16 @@ blueprint:
       selector:
         entity:
           domain: sensor
-    
-    # --- 3. GEHEUGEN ---
-    last_price_helper:
-      name: "Helper: Geheugen Inkoopprijs"
+
+    # --- BOOST ---
+    boost_switch:
+      name: "Optie: Boost Schakelaar"
+      default: []
       selector:
         entity:
-          domain: input_number
+          domain: input_boolean
 
-    # --- 4. INSTELLINGEN: OCHTEND & DOELEN ---
-    target_soc_morning_min:
-      name: "Ochtend Garantie (%)"
-      default: 50
-      selector:
-        number:
-          min: 0
-          max: 100
-          unit_of_measurement: "%"
-    target_soc_winter:
-      name: "Doel: Winter (%)"
-      default: 90
-      selector:
-        number:
-          min: 10
-          max: 100
-    target_soc_summer:
-      name: "Doel: Zomer (%)"
-      default: 30
-      selector:
-        number:
-          min: 10
-          max: 100
-    summer_solar_threshold:
-      name: "Grens Zonnige Dag (kWh)"
-      default: 15
-      selector:
-        number:
-          min: 0
-          max: 100
-          unit_of_measurement: "kWh"
-
-    # --- 5. INSTELLINGEN: RENDEMENT ---
-    min_profit_margin:
-      name: "Winstmarge (%)"
-      default: 10
-      selector:
-        number:
-          min: 0
-          max: 100
-          unit_of_measurement: "%"
-
-    # --- 6. INSTELLINGEN: TIJDSLOTEN ---
-    night_start:
-      name: "Starttijd Nacht"
-      default: "00:00:00"
-      selector:
-        time:
-    night_end:
-      name: "Eindtijd Nacht"
-      default: "06:00:00"
-      selector:
-        time:
-    day_start:
-      name: "Starttijd Middag"
-      default: "12:00:00"
-      selector:
-        time:
-    day_end:
-      name: "Eindtijd Middag"
-      default: "15:00:00"
-      selector:
-        time:
-
-    # --- 7. OVERIGE INPUTS ---
+    # --- ZON & SEIZOEN ---
     solar_forecast_today:
       name: "Sensor: Zon VANDAAG"
       selector:
@@ -131,14 +99,42 @@ blueprint:
       selector:
         entity:
           domain: sensor
-    boost_switch:
-      name: "Knop: Boost (Handmatig)"
-      default: []
+    summer_solar_threshold:
+      name: "Drempel Zonnige Dag (kWh)"
+      default: 15
       selector:
-        entity:
-          domain: input_boolean
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "kWh"
+
+    # --- RENDEMENT & DOELEN ---
+    min_profit_margin:
+      name: "Minimale Winstmarge (%)"
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 50
+          unit_of_measurement: "%"
+    target_soc_winter:
+      name: "Doel SoC Winter (%)"
+      default: 90
+      selector:
+        number:
+          min: 10
+          max: 100
+    target_soc_summer:
+      name: "Doel SoC Zomer (%)"
+      default: 30
+      selector:
+        number:
+          min: 10
+          max: 100
+
+    # --- SYSTEEM ---
     battery_capacity_kwh:
-      name: "Batterij Grootte (kWh)"
+      name: "Batterij Capaciteit (kWh)"
       default: 10
       selector:
         number:
@@ -154,7 +150,7 @@ blueprint:
           max: 22
           step: 0.1
     safety_factor:
-      name: "Vertragingsfactor"
+      name: "BMS Vertragingsfactor"
       default: 1.5
       selector:
         number:
@@ -162,7 +158,7 @@ blueprint:
           max: 4.0
           step: 0.1
     max_price_cap:
-      name: "Noodstop Prijs (€)"
+      name: "Absolute Max Prijs (€)"
       default: 0.35
       selector:
         number:
@@ -172,7 +168,7 @@ blueprint:
           mode: box
           unit_of_measurement: "€"
     emergency_soc:
-      name: "Nood Bodem (%)"
+      name: "Nood SoC (%)"
       default: 10
       selector:
         number:
@@ -181,13 +177,12 @@ blueprint:
           unit_of_measurement: "%"
 
 variables:
-  # Inputs koppelen
+  # Inputs
   battery_reserve_switch: !input battery_reserve_switch
   battery_soc_sensor: !input battery_soc_sensor
   frank_price_sensor: !input frank_price_sensor
-  last_price_helper: !input last_price_helper
   boost_switch: !input boost_switch
-  notify_device: !input notify_device
+  notify_service_name: !input notify_service_name
   report_time_evening: !input report_time_evening
   report_time_morning: !input report_time_morning
   target_soc_morning_min: !input target_soc_morning_min
@@ -229,10 +224,8 @@ action:
   - variables:
       current_soc: "{{ states(battery_soc_sensor) | float(0) }}"
       current_price: "{{ states(frank_price_sensor) | float(0) }}"
-      stored_price: "{{ states(last_price_helper) | float(0) }}"
       is_boost_active: "{{ boost_switch != [] and is_state(boost_switch, 'on') }}"
-      # Check of er een apparaat is geselecteerd
-      has_notify_device: "{{ notify_device != [] }}"
+      should_notify: "{{ notify_service_name | length > 0 }}"
 
       # --- 1. TIJDSLOT LOGICA ---
       is_in_slot: >-
@@ -249,7 +242,6 @@ action:
         {% endif %}
         {{ night_active or day_active }}
       
-      # Nacht check voor Ochtend Garantie
       is_night_now: >-
         {% set now_h = now().hour %}
         {% set ns = night_start.split(':')[0] | int %}
@@ -258,7 +250,7 @@ action:
         {% else %}       {{ now_h >= ns and now_h < ne }}
         {% endif %}
 
-      # --- 2. DATA PARSEN ---
+      # --- 2. DATA PARSEN (VERSIMPELD VOOR NIEUWE INTEGRATIE) ---
       raw: "{{ state_attr(frank_price_sensor, 'prices') }}"
       prices_json: >-
         {% if raw %}
@@ -274,12 +266,18 @@ action:
             {% set h = m[3]|int %}
             {% set mn = m[4]|int %}
             {% set price = m[5]|float %}
-            {% set iso_utc = "%04d-%02d-%02dT%02d:%02d:00+00:00" | format(y, mo, d, h, mn) %}
-            {% set local_dt = iso_utc | as_datetime | as_local %}
+            
+            {# AANPASSING V36: GEEN TIJDZONE CONVERSIE MEER #}
+            {# We nemen aan dat het uur 'h' al correct is #}
+            
+            {# We maken wel een timestamp voor de datum-check #}
+            {% set raw_dt_str = "%04d-%02d-%02dT%02d:%02d:00" | format(y, mo, d, h, mn) %}
+            {% set ts_val = as_timestamp(raw_dt_str) %}
+            
             {
-              "local_hour": {{ local_dt.hour }},
-              "day_str": "{{ 'Vandaag' if local_dt.date() == now().date() else 'Morgen' }}",
-              "ts": {{ as_timestamp(local_dt) }},
+              "local_hour": {{ h }},
+              "day_str": "{{ 'Vandaag' if d == now().day else 'Morgen' }}",
+              "ts": {{ ts_val }},
               "price": {{ price }}
             }{{ "," if not loop.last }}
           {%- endfor %}
@@ -302,6 +300,7 @@ action:
               {% set p_hour = item.local_hour %}
               {% set p_ts = item.ts %}
               
+              {# A. Filter Verleden #}
               {% if p_ts >= history_cutoff %}
                   {% set output.global_sum = output.global_sum + item.price %}
                   {% set output.global_count = output.global_count + 1 %}
@@ -340,17 +339,6 @@ action:
       sorted_night: "{{ filtered_data.night | sort }}"
       avg_price_day: "{{ filtered_data.global_avg }}"
       profit_price_limit: "{{ avg_price_day * (1 - (min_profit_margin / 100)) }}"
-      
-      # WINSTGRENS voor Smart Holding:
-      # Als de prijs HOGER is dan dit, gaan we ontladen (schakelaar UIT).
-      # Als de prijs LAGER is dan dit, houden we vast (schakelaar AAN).
-      # We gebruiken de opgeslagen prijs, OF de huidige prijs als fallback als er nog niks is.
-      holding_limit: >-
-        {% if stored_price > 0 %}
-          {{ stored_price * (1 + (min_profit_margin / 100)) }}
-        {% else %}
-          {{ current_price * (1 + (min_profit_margin / 100)) }}
-        {% endif %}
 
       # --- 4. ZON & DOEL ---
       forecast_tomorrow_val: "{{ states(solar_forecast_tomorrow) | float(0) }}"
@@ -365,25 +353,33 @@ action:
 
       # --- 5. UREN ---
       hours_calc: >-
+        {# PLAN A: OCHTEND GARANTIE #}
         {% set deficit_morning = target_soc_morning_min - current_soc %}
         {% if deficit_morning > 0 %}
            {% set kwh_morning = (deficit_morning / 100.0) * battery_capacity_kwh %}
            {% set raw_h = kwh_morning / charge_power_kw %}
            {% set h_morning = (raw_h * safety_factor) | round(0, 'ceil') | int %}
-        {% else %} {% set h_morning = 0 %} {% endif %}
+        {% else %}
+           {% set h_morning = 0 %}
+        {% endif %}
 
+        {# PLAN B: TOTAAL DOEL #}
         {% set deficit_total = dynamic_target_soc - current_soc %}
         {% if deficit_total > 0 %}
            {% set kwh_total = (deficit_total / 100.0) * battery_capacity_kwh %}
            {% set strict = (kwh_total / charge_power_kw) | round(0, 'ceil') | int %}
-        {% else %} {% set strict = 0 %} {% endif %}
-        
-        {"morning": {{ h_morning }}, "strict": {{ strict }}}
+           {% set safe = (strict * safety_factor) | round(0, 'ceil') | int %}
+        {% else %}
+           {% set strict = 0 %}
+           {% set safe = 0 %}
+        {% endif %}
+        {"morning": {{ h_morning }}, "strict": {{ strict }}, "safe": {{ safe }}}
 
       hours_morning: "{{ hours_calc.morning }}"
       hours_strict: "{{ hours_calc.strict }}"
+      hours_safe: "{{ hours_calc.safe }}"
 
-      # --- 6. DREMPELS BEPALEN ---
+      # --- 6. DREMPELS ---
       threshold_morning: >-
         {% if sorted_night | length > 0 and hours_morning > 0 %}
            {% set idx = (hours_morning - 1) if (hours_morning - 1) < sorted_night|length else (sorted_night|length - 1) %}
@@ -396,46 +392,51 @@ action:
            {{ sorted_all[idx] }}
         {% else %} -999 {% endif %}
 
+      threshold_safe: >-
+        {% if sorted_all | length > 0 and hours_safe > 0 %}
+           {% set idx = (hours_safe - 1) if (hours_safe - 1) < sorted_all|length else (sorted_all|length - 1) %}
+           {{ sorted_all[idx] }}
+        {% else %} -999 {% endif %}
+
   - choose:
-      # --- A. RAPPORTAGE ---
+      # --- RAPPORTAGE TRIGGER ---
       - conditions:
           - condition: trigger
             id: "report"
         sequence:
           - if:
               - condition: template
-                value_template: "{{ has_notify_device }}"
+                value_template: "{{ should_notify }}"
             then:
-              - domain: mobile_app
-                type: notify
-                device_id: !input notify_device
-                message: >-
-                  📊 **Batterij Rapport**
-                  
-                  🔋 **Status**
-                  SoC: {{ current_soc }}% -> Doel: {{ dynamic_target_soc }}%
-                  Ingekocht: €{{ stored_price | round(3) }}
-                  
-                  💰 **Strategie**
-                  Laden onder: €{{ threshold_strict | round(3) }}
-                  Vasthouden onder: €{{ holding_limit | round(3) }}
-                  Ochtend Garantie (<): €{{ threshold_morning | round(3) }}
-                  
-                  🕒 **Geplande Acties**
-                  {%- set ns_list = namespace(found=[]) %}
-                  {%- for item in filtered_data.slot_data %}
-                    {%- set is_morn = (item.price <= threshold_morning and is_night_now) %}
-                    {%- set is_strict = (item.price <= threshold_strict) %}
-                    {%- if is_morn or is_strict %}
-                      {%- set type = "" %}
-                      {%- if is_morn %} {% set type = type + " [Ochtend]" %} {% endif %}
-                      {%- if is_strict %} {% set type = type + " [Strikt]" %} {% endif %}
-                      {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (€" ~ item.price|round(3) ~ ")" ~ type] %}
-                    {%- endif %}
-                  {%- endfor %}
-                  {{ ns_list.found | join('\n') if ns_list.found else "Geen laadmomenten." }}
+              - service: !input notify_service_name
+                data:
+                  message: >-
+                    📊 **Batterij Laadplan**
+                    
+                    🔋 **Status**
+                    Huidig: {{ current_soc }}% -> Doel: {{ dynamic_target_soc }}%
+                    Ochtend Buffer: {{ target_soc_morning_min }}%
+                    
+                    💰 **Financieel**
+                    Strikt (<): €{{ threshold_strict | round(3) }}
+                    Buffer (<): €{{ profit_price_limit | round(3) }}
+                    Ochtend (<): €{{ threshold_morning | round(3) }}
+                    
+                    🕒 **Geplande Starttijden**
+                    {%- set ns_list = namespace(found=[]) %}
+                    {%- for item in filtered_data.slot_data %}
+                      {%- if item.price <= threshold_strict %}
+                        {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (€" ~ item.price|round(3) ~ ")"] %}
+                      {%- elif item.price <= threshold_safe and item.price < profit_price_limit %}
+                        {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (Buffer)"] %}
+                      {%- endif %}
+                    {%- endfor %}
+                    {{ ns_list.found | join('\n') if ns_list.found else "Geen geschikte uren gevonden." }}
+                    {% else %}
+                    ⛔ Geen komende laad-uren meer beschikbaar in de data.
+                    {% endif %}
 
-      # --- B. BOOST ---
+      # --- BOOST ---
       - conditions:
           - condition: trigger
             id: "boost"
@@ -445,14 +446,13 @@ action:
               entity_id: !input battery_reserve_switch
           - if:
               - condition: template
-                value_template: "{{ has_notify_device }}"
+                value_template: "{{ should_notify }}"
             then:
-              - domain: mobile_app
-                type: notify
-                device_id: !input notify_device
-                message: "🚀 Boost geactiveerd!"
+              - service: !input notify_service_name
+                data:
+                  message: "🚀 Boost geactiveerd!"
 
-      # --- C. NOOD ---
+      # --- NOOD ---
       - conditions:
           - condition: template
             value_template: "{{ current_soc < emergency_soc }}"
@@ -468,14 +468,13 @@ action:
                   entity_id: !input battery_reserve_switch
               - if:
                   - condition: template
-                    value_template: "{{ has_notify_device }}"
+                    value_template: "{{ should_notify }}"
                 then:
-                  - domain: mobile_app
-                    type: notify
-                    device_id: !input notify_device
-                    message: "⚠️ Noodlading gestart."
+                  - service: !input notify_service_name
+                    data:
+                      message: "⚠️ Noodlading gestart."
 
-      # --- D. SLIM LADEN / VASTHOUDEN ---
+      # --- SLIM LADEN ---
       - conditions:
           - condition: or
             conditions:
@@ -493,17 +492,21 @@ action:
                     value_template: "{{ is_in_slot }}"
                   - condition: template
                     value_template: "{{ current_price <= threshold_strict }}"
-              # 3. VASTHOUDEN (Smart Holding)
+              # 3. BUFFER
               - condition: and
                 conditions:
                   - condition: template
                     value_template: "{{ is_in_slot }}"
                   - condition: template
-                    value_template: "{{ current_price < holding_limit }}"
+                    value_template: "{{ current_price <= threshold_safe }}"
+                  - condition: template
+                    value_template: "{{ current_price < profit_price_limit }}"
           
           # Veiligheid
           - condition: template
             value_template: "{{ current_price < max_price_cap }}"
+          - condition: template
+            value_template: "{{ current_soc < dynamic_target_soc }}"
         sequence:
           - if:
               - condition: template
@@ -512,46 +515,27 @@ action:
               - service: switch.turn_on
                 target:
                   entity_id: !input battery_reserve_switch
-              
-              # SLA DE INKOOPPRIJS OP (Alleen bij laden)
-              - if:
-                  - condition: or
-                    conditions:
-                      - condition: template
-                        value_template: "{{ current_price <= threshold_strict }}"
-                      - condition: template
-                        value_template: "{{ current_price <= threshold_morning }}"
-                then:
-                  - service: input_number.set_value
-                    target:
-                      entity_id: !input last_price_helper
-                    data:
-                      value: "{{ current_price }}"
-              
-              # NOTIFICATIE (Anti-Spam)
+              # NOTIFICATIE (MAX 1x per uur)
               - if:
                   - condition: template
-                    value_template: "{{ has_notify_device }}"
+                    value_template: "{{ should_notify }}"
                   - condition: template
                     value_template: >-
                       {% if states[battery_reserve_switch].last_changed %}
                         {{ (as_timestamp(now()) - as_timestamp(states[battery_reserve_switch].last_changed)) > 3600 }}
                       {% else %} true {% endif %}
                 then:
-                  - domain: mobile_app
-                    type: notify
-                    device_id: !input notify_device
-                    message: >-
-                      🔋 Laden/Hold actief. Prijs: €{{ current_price | round(3) }}
+                  - service: !input notify_service_name
+                    data:
+                      message: >-
+                        🔋 Slim laden gestart! 
+                        Prijs: €{{ current_price | round(3) }}
 
-      # --- E. STOPPEN / ONTLADEN ---
+      # --- STOPPEN (EEPROM BESCHERMING) ---
       - conditions:
           - condition: template
             value_template: "{{ is_state(battery_reserve_switch, 'on') }}"
         sequence:
-          # UITZETTEN ALLEEN ALS:
-          # 1. Timer > 30 min (Bescherming)
-          # 2. OF Price Spike (Direct geld verdienen)
           - if:
               - condition: or
                 conditions:
@@ -561,22 +545,10 @@ action:
                         {{ (as_timestamp(now()) - as_timestamp(states[battery_reserve_switch].last_changed)) > 1800 }}
                       {% else %} true {% endif %}
                   - condition: template
-                    value_template: "{{ current_price > holding_limit }}"
+                    value_template: "{{ current_soc >= dynamic_target_soc }}"
             then:
               - service: switch.turn_off
                 target:
                   entity_id: !input battery_reserve_switch
-              # Melding bij Price Spike
-              - if:
-                  - condition: template
-                    value_template: "{{ current_price > holding_limit }}"
-                  - condition: template
-                    value_template: "{{ has_notify_device }}"
-                then:
-                  - domain: mobile_app
-                    type: notify
-                    device_id: !input notify_device
-                    message: >-
-                      💰 Winst pakken! Prijs (€{{ current_price }}) is hoog genoeg. Ontladen gestart.
 
 mode: single
