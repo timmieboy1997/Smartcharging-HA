@@ -1,5 +1,6 @@
 # 🔋 Frank Energie - Smart Battery Manager
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/pwnypower)
 [![Open your Home Assistant instance and show the blueprint import dialog with a specific blueprint pre-filled.](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=LINK_TO_YOUR_GITHUB_YAML_FILE)
 
 **The ultimate "Set & Forget" automation for home batteries with dynamic energy tariffs.**
@@ -105,8 +106,17 @@ A: `Morning` means charging is forced to ensure you survive the morning. `Strict
 
 ---
 
+## ☕ Support my work
+
+If this blueprint saves you money on your energy bill, consider buying me a coffee! It helps me maintain the code and add new features like active trading logic.
+
+<a href="https://www.buymeacoffee.com/pwnypower" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+
+---
+
 ## 📄 License
 
 This project is licensed under the MIT License - feel free to modify and share.
 
 * **Version:** 1.0 (Production)
+* **Author:** PwnyPower
