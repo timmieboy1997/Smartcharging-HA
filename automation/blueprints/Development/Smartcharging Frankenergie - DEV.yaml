@@ -1,16 +1,18 @@
 blueprint:
-  name: "Frank Energie - Smart Battery Manager (V1.6.1)"
+  name: "Frank Energie - Smart Battery Manager (V1.6.2)"
   description: >
-    **Production Release V1.6.1 - EEPROM Saver Edition**
+    **Production Release V1.6.2 - Financial Logic Fix**
     
-    CHANGE LOG V1.6.1:
-    - FIX: Hold mode no longer chases Solar gain. It only writes to inverter if Target SoC > Current SoC (to stop grid charging).
-    - Solar Friendly: If battery charges via sun above the hold-target, it remains untouched.
+    CHANGE LOG V1.6.2:
+    - FIX: Selector error (removed invalid min/max keys).
+    - LOGIC UPDATE: "Smart Hold" now looks at financial value instead of just SoC.
+      If Grid Price < Last Purchase Price -> HOLD (Use cheap grid, save expensive battery).
+      If Grid Price > Last Purchase Price -> DISCHARGE (Use cheap battery).
     
     LOGIC:
-    1. CHARGE: Price Cheap -> Switch ON, Target SoC = Winter/Summer Target.
-    2. HOLD: Price Medium -> Switch ON. If Inverter Target > Current SoC -> Set Target = Current (Stops Grid Charge).
-    3. DISCHARGE: Price High -> Switch OFF.
+    1. CHARGE: Price Cheap -> Switch ON, Target = High.
+    2. HOLD: Price < Purchase Price -> Switch ON, Target = Current (Use Grid).
+    3. DISCHARGE: Price > Purchase Price OR Profit Take -> Switch OFF (Use Battery).
     
     **Supported Languages:** English, Nederlands.
   domain: automation
@@ -59,8 +61,6 @@ blueprint:
       selector:
         entity:
           domain: number
-          min: 0
-          max: 100
     battery_soc_sensor:
       name: "Sensor: Battery SoC"
       description: "Sensor indicating current battery percentage."
@@ -77,6 +77,7 @@ blueprint:
     # --- MEMORY ---
     last_price_helper:
       name: "Helper: Last Purchase Price"
+      description: "MUST BE SET: Input Number that stores the price you last charged at."
       selector:
         entity:
           domain: input_number
@@ -152,11 +153,6 @@ blueprint:
       default: "15:00:00"
       selector:
         time:
-    day_end:
-      name: "Day Slot End"
-      default: "15:00:00"
-      selector:
-        time:
 
     # --- ADVANCED ---
     solar_forecast_today:
@@ -217,6 +213,7 @@ blueprint:
           min: 0
           max: 100
           unit_of_measurement: "%"
+    language: !input language
 
 variables:
   # Inputs
@@ -361,9 +358,10 @@ action:
 
       profit_price_limit: "{{ avg_price_day * (1 - (current_profit_margin / 100)) }}"
       
+      # STORED PRICE LOGIC
+      stored_price: "{{ states(last_price_helper) | float(0) }}"
       holding_limit: >-
-        {% set stored = states(last_price_helper) | float(0) %}
-        {% if stored > 0 %} {{ stored * (1 + (current_profit_margin / 100)) }}
+        {% if stored_price > 0 %} {{ stored_price * (1 + (current_profit_margin / 100)) }}
         {% else %} {{ target_price * (1 + (current_profit_margin / 100)) }} {% endif %}
 
       # 5. THRESHOLDS & DECISIONS
@@ -397,9 +395,21 @@ action:
       
       should_profit_take: "{{ target_price > holding_limit }}"
       
-      # HOLD: Not charging AND Not Profit Taking AND Battery below target AND In a valid slot
+      # SMART HOLD:
+      # If we are NOT charging, AND NOT taking profit:
+      # We hold IF the Grid Price is LOWER than our Purchase Price (stored_price).
+      # If Grid is cheaper than Stored: Use Grid (Hold).
+      # If Grid is more expensive than Stored: Use Battery (Discharge/Continue).
       should_hold: >-
-        {{ not should_charge and not should_profit_take and current_soc < dynamic_target_soc and is_in_slot }}
+        {% if not should_charge and not should_profit_take and is_in_slot %}
+           {% if stored_price > 0 %}
+              {{ target_price <= stored_price }}
+           {% else %}
+              {{ current_soc < dynamic_target_soc }}
+           {% endif %}
+        {% else %}
+           false
+        {% endif %}
 
   - choose:
       # A. REPORTING
@@ -422,10 +432,12 @@ action:
                     
                     Garantie (<): €{{ threshold_morning | round(3) }}
                     Laden onder: €{{ threshold_strict | round(3) }}
+                    Huidig: €{{ target_price|round(3) }} (Gekocht: €{{ stored_price|round(3) }})
                   {% else %}
                     📊 **Battery Plan**
                     SoC: {{ current_soc }}% -> Target: {{ dynamic_target_soc }}%
                     Status: {{ '🟢 Charge' if should_charge else ('🟠 Hold' if should_hold else '🔴 Discharge') }}
+                    Current: €{{ target_price|round(3) }} (Bought: €{{ stored_price|round(3) }})
                   {% endif %}
 
       # B. BOOST / EMERGENCY
@@ -454,7 +466,7 @@ action:
                 device_id: !input notify_device
                 message: "🚀 Boost!"
 
-      # C. CHARGE MODE (Cheap Price)
+      # C. CHARGE MODE
       - conditions:
           - condition: template
             value_template: "{{ should_charge }}"
@@ -467,7 +479,6 @@ action:
             target:
               entity_id: !input battery_reserve_switch
           
-          # Only write if Inverter Target is not yet the Winter/Summer Target
           - if:
               - condition: template
                 value_template: "{{ abs(states(target_soc_number)|float(0) - dynamic_target_soc) > 1 }}"
@@ -493,7 +504,7 @@ action:
                 device_id: !input notify_device
                 message: "🔋 Start Laden (€{{ target_price|round(3) }})"
 
-      # D. HOLD MODE (Medium Price)
+      # D. HOLD MODE
       - conditions:
           - condition: template
             value_template: "{{ should_hold }}"
@@ -502,9 +513,7 @@ action:
             target:
               entity_id: !input battery_reserve_switch
           
-          # CRITICAL CHECK: Only write if the INVERTER setting is HIGHER than current SoC.
-          # Example: Inverter says "Charge to 90%", but we want to HOLD at 50%. -> Write 50%.
-          # Example: Inverter says "Charge to 50%", but sun pushed battery to 55%. -> Do NOTHING.
+          # Only clamp Target SoC if Inverter Target > Current SoC (Prevent Grid Charge)
           - if:
               - condition: template
                 value_template: "{{ states(target_soc_number)|float(0) > (current_soc + 1) }}"
@@ -527,8 +536,5 @@ action:
           - service: switch.turn_off
             target:
               entity_id: !input battery_reserve_switch
-          
-          # We do NOT change the Target SoC here to save EEPROM.
-          # Switching "Force Charge" to OFF is usually enough to start self-consumption.
 
 mode: single
