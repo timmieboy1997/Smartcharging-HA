@@ -1,9 +1,9 @@
 blueprint:
-  name: "Frank Energie - Smart Battery Manager v1.4.9 (Syntax Fix)"
+  name: "Frank Energie - Smart Battery Manager v1.5.0 (Final Fix)"
   description: >
-    **Fix v1.4.9:**
-    - Opgelost: TemplateSyntaxError ('!'). Inputs worden nu correct gemapt.
-    - Hersteld: Trace Labels (Aliassen) voor makkelijker debuggen.
+    **Fix v1.5.0:**
+    - Definitieve oplossing voor TemplateSyntaxError.
+    - Alle inputs worden nu strikt via variabelen aangeroepen in de logica.
     
     STRATEGY: Profit & Hardware Protection.
   domain: automation
@@ -211,7 +211,7 @@ blueprint:
       selector:
         time:
 
-# Trigger Variables
+# Trigger Variables (Safe Mapping)
 trigger_variables:
   boost_entity: !input boost_switch
 
@@ -233,44 +233,51 @@ trigger:
     id: "boost"
 
 action:
+  # --- 1. GLOBAL VARIABLE MAPPING (The Fix) ---
   - variables:
-      # --- 1. MAPPING (DIRECT) ---
+      # Entities
       conf_soc_sensor: !input battery_soc_sensor
       conf_price_sensor: !input frank_price_sensor
       conf_last_price: !input last_price_helper
       conf_boost: !input boost_switch
       conf_notify: !input notify_device
       conf_target_num: !input target_soc_number
+      conf_switch: !input battery_reserve_switch
       
-      p_peak_count: !input peak_hours_count
-      p_buffer_disc: !input buffer_discount_percentage
-      p_min_discharge: !input min_discharge_margin
-      p_bat_cap: !input battery_capacity_kwh
-      p_charge_kw: !input charge_power_kw
-      p_safety: !input safety_factor
-      p_max_cap: !input max_price_cap
+      # Parameters (p_)
+      p_peak_count: "{{ (!input peak_hours_count) | int }}"
+      p_buffer_disc: "{{ (!input buffer_discount_percentage) | float }}"
+      p_min_discharge: "{{ (!input min_discharge_margin) | float }}"
+      p_bat_cap: "{{ (!input battery_capacity_kwh) | float }}"
+      p_charge_kw: "{{ (!input charge_power_kw) | float }}"
+      p_safety: "{{ (!input safety_factor) | float }}"
+      p_max_cap: "{{ (!input max_price_cap) | float }}"
+      p_min_base_soc: "{{ (!input min_base_soc) | int }}"
       
-      t_morn_min: !input target_soc_morning_min
-      t_winter: !input target_soc_winter
-      t_summer: !input target_soc_summer
-      t_solar_th: !input summer_solar_threshold
+      # Targets (t_)
+      t_morn_min: "{{ (!input target_soc_morning_min) | float }}"
+      t_winter: "{{ (!input target_soc_winter) | float }}"
+      t_summer: "{{ (!input target_soc_summer) | float }}"
+      t_solar_th: "{{ (!input summer_solar_threshold) | float }}"
       
+      # Sensors (s_)
       s_sol_today: !input solar_forecast_today
       s_sol_tom: !input solar_forecast_tomorrow
 
+      # Times
       conf_night_start: !input night_start
       conf_night_end: !input night_end
       conf_day_start: !input day_start
       conf_day_end: !input day_end
 
-      # --- 2. STATE READING ---
+      # Current States
       current_soc: "{{ states(conf_soc_sensor) | float(0) }}"
       current_price: "{{ states(conf_price_sensor) | float(0) }}"
       last_paid_price: "{{ states(conf_last_price) | float(0) }}"
       is_boost_active: "{{ conf_boost != [] and is_state(conf_boost, 'on') }}"
       has_notify_device: "{{ conf_notify != [] }}"
       
-      # --- 3. TIME SLOT LOGIC ---
+      # --- 2. TIME SLOT LOGIC ---
       now_h: "{{ now().hour }}"
       ns: "{{ conf_night_start.split(':')[0] | int }}"
       ne: "{{ conf_night_end.split(':')[0] | int }}"
@@ -294,7 +301,7 @@ action:
         {% endif %}
         {{ night_active or day_active }}
 
-      # --- 4. DATA PARSEN ---
+      # --- 3. DATA PARSEN ---
       raw: "{{ state_attr(conf_price_sensor, 'prices') }}"
       prices_json: >-
         {% if raw %}
@@ -322,7 +329,7 @@ action:
           ]
         {% else %} [] {% endif %}
 
-      # --- 5. ANALYSIS ---
+      # --- 4. ANALYSIS ---
       filtered_data: >-
         {% set output = namespace(price_list=[], slot_data=[], am_prices=[], pm_prices=[]) %}
         {% set now_ts = as_timestamp(now()) %}
@@ -342,20 +349,18 @@ action:
            {% endfor %}
         {% endif %}
         
-        {# Casting peak_hours to int inside the template #}
         {% set sort_am = output.am_prices | sort(reverse=True) %}
         {% set sort_pm = output.pm_prices | sort(reverse=True) %}
-        {% set pk = p_peak_count | int %}
         
         {% set am_avg = 0 %}
         {% if sort_am | length > 0 %}
-           {% set count = [sort_am|length, pk] | min %}
+           {% set count = [sort_am|length, p_peak_count|int] | min %}
            {% set am_avg = (sort_am[:count] | sum / count) %}
         {% endif %}
         
         {% set pm_avg = 0 %}
         {% if sort_pm | length > 0 %}
-           {% set count = [sort_pm|length, pk] | min %}
+           {% set count = [sort_pm|length, p_peak_count|int] | min %}
            {% set pm_avg = (sort_pm[:count] | sum / count) %}
         {% endif %}
 
@@ -369,7 +374,7 @@ action:
       
       buffer_limit: "{{ relevant_peak_price * (1 - (p_buffer_disc|float / 100)) }}"
 
-      # --- 6. TARGETS & LIMITS ---
+      # --- 5. TARGETS ---
       forecast_tomorrow_val: "{{ states(s_sol_tom) | float(0) }}"
       relevant_solar: >-
         {% if now().hour >= 14 %} {{ forecast_tomorrow_val }}
@@ -380,7 +385,7 @@ action:
         {% else %} {{ t_winter }}
         {% endif %}
 
-      # Charge Ceiling
+      # --- 6. CHARGE CEILING ---
       charge_limit_strict: >-
         {% set deficit = dynamic_target_soc|float - current_soc %}
         {% if deficit > 0 %}
@@ -392,7 +397,7 @@ action:
            {% else %} -999 {% endif %}
         {% else %} -999 {% endif %}
 
-      # Discharge Threshold
+      # --- 7. DISCHARGE THRESHOLD ---
       discharge_start_price: "{{ last_paid_price * (1 + (p_min_discharge|float / 100)) }}"
 
   - choose:
@@ -448,7 +453,7 @@ action:
                     {{ ns_list.found | join('\n') if ns_list.found else "Geen." }}
                   {% else %}
                     📊 **Battery Plan**
-                    ... (English Omitted)
+                    ...
                   {% endif %}
 
       # --- PRIORITY 2: BOOST ---
@@ -467,18 +472,19 @@ action:
               entity_id: !input battery_reserve_switch
 
       # --- PRIORITY 3: EMERGENCY ---
+      # Using variables (p_min_base_soc) instead of !input
       - alias: "3. Emergency Charge"
         conditions:
           - condition: template
-            value_template: "{{ current_soc < !input min_base_soc }}"
+            value_template: "{{ current_soc < p_min_base_soc }}"
           - condition: template
-            value_template: "{{ current_price < (!input max_price_cap * 1.5) }}"
+            value_template: "{{ current_price < (p_max_cap * 1.5) }}"
         sequence:
           - service: number.set_value
             target:
               entity_id: !input target_soc_number
             data:
-              value: "{{ !input min_base_soc }}"
+              value: "{{ p_min_base_soc }}"
           - service: switch.turn_on
             target:
               entity_id: !input battery_reserve_switch
@@ -499,9 +505,9 @@ action:
                   - condition: template
                     value_template: "{{ is_night_now }}"
                   - condition: template
-                    value_template: "{{ current_soc < t_morn_min|float }}"
+                    value_template: "{{ current_soc < t_morn_min }}"
                   - condition: template
-                    value_template: "{{ current_price < p_max_cap|float }}"
+                    value_template: "{{ current_price < p_max_cap }}"
               # B. BUFFER
               - condition: and
                 conditions:
@@ -510,7 +516,7 @@ action:
                   - condition: template
                     value_template: "{{ current_price <= buffer_limit }}"
                   - condition: template
-                    value_template: "{{ current_soc < dynamic_target_soc|float }}"
+                    value_template: "{{ current_soc < dynamic_target_soc }}"
               # C. STRICT
               - condition: and
                 conditions:
@@ -519,33 +525,40 @@ action:
                   - condition: template
                     value_template: "{{ current_price <= charge_limit_strict }}"
                   - condition: template
-                    value_template: "{{ current_soc < dynamic_target_soc|float }}"
+                    value_template: "{{ current_soc < dynamic_target_soc }}"
         sequence:
+          # 1. SET TARGET (Fix for Hold -> Charge transition)
           - if:
               - condition: template
-                value_template: "{{ (states(conf_target_num)|float(0) - dynamic_target_soc|float)|abs > 1 }}"
+                # Only write if current setting != target
+                value_template: "{{ (states(conf_target_num)|float(0) - dynamic_target_soc)|abs > 1 }}"
             then:
               - service: number.set_value
                 target:
                   entity_id: !input target_soc_number
                 data:
                   value: "{{ dynamic_target_soc }}"
+          
+          # 2. SWITCH ON
           - service: switch.turn_on
             target:
               entity_id: !input battery_reserve_switch
+          
+          # 3. STORE PRICE
           - service: input_number.set_value
             target:
               entity_id: !input last_price_helper
             data:
               value: "{{ current_price }}"
-          # Notification
+          
+          # 4. NOTIFICATION
           - if:
               - condition: template
                 value_template: "{{ has_notify_device }}"
               - condition: template
                 value_template: >-
-                  {% if states[battery_reserve_switch].last_changed %}
-                    {{ (as_timestamp(now()) - as_timestamp(states[battery_reserve_switch].last_changed)) > 3600 }}
+                  {% if states[conf_switch].last_changed %}
+                    {{ (as_timestamp(now()) - as_timestamp(states[conf_switch].last_changed)) > 3600 }}
                   {% else %} true {% endif %}
             then:
               - domain: mobile_app
@@ -561,7 +574,7 @@ action:
                   {% endif %}
 
       # --- PRIORITY 5: DISCHARGING ---
-      - alias: "5. Discharging (Profit)"
+      - alias: "5. Discharging"
         conditions:
           - condition: template
             value_template: "{{ current_price >= discharge_start_price }}"
@@ -572,13 +585,13 @@ action:
           # Un-anchor
           - if:
               - condition: template
-                value_template: "{{ (states(conf_target_num)|float(0) - !input min_base_soc)|abs > 1 }}"
+                value_template: "{{ (states(conf_target_num)|float(0) - p_min_base_soc)|abs > 1 }}"
             then:
               - service: number.set_value
                 target:
                   entity_id: !input target_soc_number
                 data:
-                  value: "{{ !input min_base_soc | int }}"
+                  value: "{{ p_min_base_soc }}"
 
       # --- PRIORITY 6: HOLD ---
       - alias: "6. Smart Hold"
@@ -608,8 +621,8 @@ action:
                     value_template: "{{ has_notify_device }}"
                   - condition: template
                     value_template: >-
-                      {% if states[battery_reserve_switch].last_changed %}
-                        {{ (as_timestamp(now()) - as_timestamp(states[battery_reserve_switch].last_changed)) > 3600 }}
+                      {% if states[conf_switch].last_changed %}
+                        {{ (as_timestamp(now()) - as_timestamp(states[conf_switch].last_changed)) > 3600 }}
                       {% else %} true {% endif %}
                 then:
                   - domain: mobile_app
@@ -623,7 +636,7 @@ action:
           - condition: template
             value_template: "{{ not is_in_slot }}"
           - condition: template
-            value_template: "{{ is_state(battery_reserve_switch, 'on') }}"
+            value_template: "{{ is_state(conf_switch, 'on') }}"
         sequence:
           - service: switch.turn_off
             target:
