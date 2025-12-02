@@ -1,11 +1,11 @@
 blueprint:
-  name: "Frank Energie - Smart Battery Manager v1.5.9 (JSON Fix)"
+  name: "Frank Energie - Smart Battery Manager v1.5.5 (Sequential Fix)"
   description: >
-    **Fix v1.5.9:**
-    - JSON Engine Rebuild: Uses proper 'to_json' filters to prevent escaping issues in traces.
-    - Data is now cleaner and easier to debug.
+    **Fix v1.5.5:**
+    - CRITICAL FIX: Variabelen worden nu in de juiste volgorde berekend (Sequential Processing).
+    - Dit lost het probleem op dat 'filtered_data' leeg bleef of code toonde in plaats van waarden.
     
-    STRATEGY: Profit, Hardware Protection & 24/7 Logic (Day-Ahead Peak ignored).
+    STRATEGY: Profit & Hardware Protection.
   domain: automation
   input:
     # --- GENERAL ---
@@ -190,6 +190,16 @@ blueprint:
       default: "06:00:00"
       selector:
         time:
+    day_start:
+      name: "Day Slot Start"
+      default: "12:00:00"
+      selector:
+        time:
+    day_end:
+      name: "Day Slot End"
+      default: "15:00:00"
+      selector:
+        time:
     report_time_evening:
       name: "Report Time (Evening)"
       default: "21:30:00"
@@ -223,8 +233,9 @@ trigger:
     id: "boost"
 
 action:
-  # --- 1. STRICT VARIABLE MAPPING ---
+  # --- STEP 1: MAP INPUTS TO VARIABLES ---
   - variables:
+      # Entities
       conf_soc_sensor: !input battery_soc_sensor
       conf_price_sensor: !input frank_price_sensor
       conf_last_price: !input last_price_helper
@@ -233,6 +244,7 @@ action:
       conf_target_num: !input target_soc_number
       conf_switch: !input battery_reserve_switch
       
+      # Settings
       p_peak_count: !input peak_hours_count
       p_buffer_disc: !input buffer_discount_percentage
       p_min_discharge: !input min_discharge_margin
@@ -242,18 +254,21 @@ action:
       p_max_cap: !input max_price_cap
       p_min_base_soc: !input min_base_soc
       
+      # Targets & Solar
       t_morn_min: !input target_soc_morning_min
       t_winter: !input target_soc_winter
       t_summer: !input target_soc_summer
       t_solar_th: !input summer_solar_threshold
-      
       s_sol_today: !input solar_forecast_today
       s_sol_tom: !input solar_forecast_tomorrow
 
+      # Times
       conf_night_start: !input night_start
       conf_night_end: !input night_end
+      conf_day_start: !input day_start
+      conf_day_end: !input day_end
 
-  # --- 2. LOGIC ---
+  # --- STEP 2: READ STATES & TIME ---
   - variables:
       current_soc: "{{ states(conf_soc_sensor) | float(0) }}"
       current_price: "{{ states(conf_price_sensor) | float(0) }}"
@@ -264,14 +279,28 @@ action:
       now_h: "{{ now().hour }}"
       ns: "{{ conf_night_start.split(':')[0] | int }}"
       ne: "{{ conf_night_end.split(':')[0] | int }}"
+      ds: "{{ conf_day_start.split(':')[0] | int }}"
+      de: "{{ conf_day_end.split(':')[0] | int }}"
+      
       night_crosses: "{{ ns > ne }}"
+      day_crosses: "{{ ds > de }}"
+
       is_night_now: >-
         {% if night_crosses %} {{ now_h >= ns or now_h < ne }}
         {% else %}             {{ now_h >= ns and now_h < ne }}
         {% endif %}
+      
+      is_in_slot: >-
+        {% if night_crosses %} {% set night_active = (now_h >= ns or now_h < ne) %}
+        {% else %}             {% set night_active = (now_h >= ns and now_h < ne) %}
+        {% endif %}
+        {% if day_crosses %}   {% set day_active = (now_h >= ds or now_h < de) %}
+        {% else %}             {% set day_active = (now_h >= ds and now_h < de) %}
+        {% endif %}
+        {{ night_active or day_active }}
 
-      # --- 3. DATA PARSEN ---
-      # Using strict JSON construction to avoid escaping issues
+  # --- STEP 3: PARSE DATA ---
+  - variables:
       raw: "{{ state_attr(conf_price_sensor, 'prices') }}"
       prices_json: >-
         {% if raw %}
@@ -279,8 +308,8 @@ action:
           {% set matches = text | regex_findall(
             "datetime\\.datetime\\((\\d+), (\\d+), (\\d+), (\\d+), (\\d+).*?price': ([0-9.]+)"
           ) %}
-          {% set ns = namespace(items=[]) %}
-          {% for m in matches %}
+          [
+          {%- for m in matches %}
             {% set y = m[0]|int %}
             {% set mo = m[1]|int %}
             {% set d = m[2]|int %}
@@ -289,15 +318,18 @@ action:
             {% set price = m[5]|float %}
             {% set raw_dt_str = "%04d-%02d-%02dT%02d:%02d:00" | format(y, mo, d, h, mn) %}
             {% set ts_val = as_timestamp(raw_dt_str) %}
-            {% set day_str = 'Today' if d == now().day else 'Tomorrow' %}
-            {% set item = dict(local_hour=h, day_str=day_str, ts=ts_val, price=price) %}
-            {% set ns.items = ns.items + [item] %}
-          {% endfor %}
-          {{ ns.items | to_json }}
+            {
+              "local_hour": {{ h }},
+              "day_str": "{{ 'Today' if d == now().day else 'Tomorrow' }}",
+              "ts": {{ ts_val }},
+              "price": {{ price }}
+            }{{ "," if not loop.last }}
+          {%- endfor %}
+          ]
         {% else %} [] {% endif %}
 
-      # --- 4. ANALYSIS (DAY ONLY) ---
-      # Using 'to_json' to prevent unwanted escaping in trace
+  # --- STEP 4: FILTER & ANALYZE (Must be separate step to use prices_json) ---
+  - variables:
       filtered_data: >-
         {% set output = namespace(price_list=[], slot_data=[], am_prices=[], pm_prices=[]) %}
         {% set now_ts = as_timestamp(now()) %}
@@ -308,14 +340,10 @@ action:
               {% if item.ts >= history_cutoff %}
                   {% set output.price_list = output.price_list + [item.price] %}
                   {% set output.slot_data = output.slot_data + [item] %}
-                  
-                  {# ONLY TODAY #}
-                  {% if item.day_str == 'Today' %}
-                    {% if item.local_hour < 12 %}
-                       {% set output.am_prices = output.am_prices + [item.price] %}
-                    {% else %}
-                       {% set output.pm_prices = output.pm_prices + [item.price] %}
-                    {% endif %}
+                  {% if item.local_hour < 12 %}
+                     {% set output.am_prices = output.am_prices + [item.price] %}
+                  {% else %}
+                     {% set output.pm_prices = output.pm_prices + [item.price] %}
                   {% endif %}
               {% endif %}
            {% endfor %}
@@ -336,47 +364,49 @@ action:
            {% set count = [sort_pm|length, pk] | min %}
            {% set pm_avg = (sort_pm[:count] | sum / count) %}
         {% endif %}
-        
-        {{ dict(all=output.price_list, slot_data=output.slot_data, am_peak=am_avg, pm_peak=pm_avg) | to_json }}
 
-      # --- VARIABLES ---
+        {"all": {{ output.price_list }}, "slot_data": {{ output.slot_data }}, "am_peak": {{ am_avg }}, "pm_peak": {{ pm_avg }} }
+
+  # --- STEP 5: DERIVED VARIABLES (Dependent on filtered_data) ---
+  - variables:
       sorted_all: "{{ filtered_data.all | sort }}"
       
-      # Determine Peak
       relevant_peak_price: >-
         {% if is_night_now %} {{ filtered_data.am_peak }}
         {% else %} {{ filtered_data.pm_peak }}
         {% endif %}
       
-      buffer_limit: "{{ relevant_peak_price | float * (1 - (p_buffer_disc|float / 100)) }}"
+      buffer_limit: "{{ relevant_peak_price | float * (1 - (p_buffer_disc | float / 100)) }}"
 
-      # Targets
+      # Solar & Targets
       forecast_tomorrow_val: "{{ states(s_sol_tom) | float(0) }}"
       relevant_solar: >-
         {% if now().hour >= 14 %} {{ forecast_tomorrow_val }}
         {% else %} {{ states(s_sol_today) | float(0) }}
         {% endif %}
       dynamic_target_soc: >-
-        {% if relevant_solar > t_solar_th|float %} {{ t_summer }}
+        {% if relevant_solar | float > t_solar_th | float %} {{ t_summer }}
         {% else %} {{ t_winter }}
         {% endif %}
 
-      # Strict Charge Limit
+      # Charge Ceiling
       charge_limit_strict: >-
-        {% set deficit = dynamic_target_soc|float - current_soc %}
+        {% set deficit = dynamic_target_soc | float - current_soc %}
         {% if deficit > 0 %}
-           {% set kwh_needed = (deficit / 100.0) * p_bat_cap|float %}
-           {% set hours_needed = (kwh_needed / p_charge_kw|float * p_safety|float) | round(0, 'ceil') | int %}
+           {% set kwh_needed = (deficit / 100.0) * p_bat_cap | float %}
+           {% set hours_needed = (kwh_needed / p_charge_kw | float * p_safety | float) | round(0, 'ceil') | int %}
            {% if sorted_all | length > 0 %}
              {% set idx = (hours_needed - 1) if (hours_needed - 1) < sorted_all|length else (sorted_all|length - 1) %}
              {{ sorted_all[idx] }}
            {% else %} -999 {% endif %}
         {% else %} -999 {% endif %}
 
-      discharge_start_price: "{{ last_paid_price * (1 + (p_min_discharge|float / 100)) }}"
+      # Discharge Threshold
+      discharge_start_price: "{{ last_paid_price * (1 + (p_min_discharge | float / 100)) }}"
 
+  # --- STEP 6: EXECUTION ---
   - choose:
-      # --- 1. REPORTING ---
+      # --- PRIORITY 1: REPORTING ---
       - alias: "1. Send Report"
         conditions:
           - condition: trigger
@@ -391,40 +421,47 @@ action:
                 device_id: !input notify_device
                 message: >-
                   {% if language == 'nl' %}
-                    📊 **Batterij Rapport (24/7)**
+                    📊 **Batterij Rapport**
                     
                     🔋 **Status**
                     Huidig: {{ current_soc }}% | Doel: {{ dynamic_target_soc }}%
+                    Ochtend Buffer: {{ t_morn_min }}%
                     
                     💰 **Financieel**
                     Strikt (<): €{{ charge_limit_strict | round(3) }}
                     Buffer (<): €{{ buffer_limit | round(3) }}
-                    Ontladen (>): €{{ discharge_start_price | round(3) }}
+                    AM Piek: €{{ filtered_data.am_peak | round(3) }} | PM Piek: €{{ filtered_data.pm_peak | round(3) }}
                     
                     🕒 **Geplande Ladingen**
                     {%- set ns_list = namespace(found=[]) %}
                     {%- for item in filtered_data.slot_data %}
                       {%- set h = item.local_hour %}
                       {%- set is_night_item = false %}
-                      {%- if night_crosses %} {%- set is_night_item = (h >= ns or h < ne) %}
-                      {%- else %} {%- set is_night_item = (h >= ns and h < ne) %}
+                      {%- if night_crosses %}
+                        {%- set is_night_item = (h >= ns or h < ne) %}
+                      {%- else %}
+                        {%- set is_night_item = (h >= ns and h < ne) %}
                       {%- endif %}
                       
+                      {%- set added = false %}
                       {%- if item.price <= charge_limit_strict %}
                         {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (€" ~ item.price|round(3) ~ ") [Strikt]"] %}
+                        {%- set added = true %}
                       {%- elif item.price <= buffer_limit %}
                         {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (€" ~ item.price|round(3) ~ ") [Buffer]"] %}
-                      {%- elif is_night_item and item.price < p_max_cap|float and current_soc < t_morn_min|float %}
+                        {%- set added = true %}
+                      {%- elif is_night_item and item.price < p_max_cap | float and current_soc < t_morn_min | float %}
                         {%- set ns_list.found = ns_list.found + [item.day_str ~ " " ~ item.local_hour ~ ":00 (€" ~ item.price|round(3) ~ ") [Ochtend]"] %}
+                        {%- set added = true %}
                       {%- endif %}
                     {%- endfor %}
                     {{ ns_list.found | join('\n') if ns_list.found else "Geen." }}
                   {% else %}
-                    📊 **Battery Report**
+                    📊 **Battery Plan**
                     ...
                   {% endif %}
 
-      # --- 2. BOOST ---
+      # --- PRIORITY 2: BOOST ---
       - alias: "2. Boost Mode"
         conditions:
           - condition: template
@@ -439,7 +476,7 @@ action:
             target:
               entity_id: !input battery_reserve_switch
 
-      # --- 3. EMERGENCY ---
+      # --- PRIORITY 3: EMERGENCY ---
       - alias: "3. Emergency Charge"
         conditions:
           - condition: template
@@ -461,12 +498,12 @@ action:
             data:
               value: "{{ current_price }}"
 
-      # --- 4. CHARGING ---
+      # --- PRIORITY 4: CHARGING ---
       - alias: "4. Smart Charging"
         conditions:
           - condition: or
             conditions:
-              # A. Morning Guarantee
+              # A. MORNING GUARANTEE
               - condition: and
                 conditions:
                   - condition: template
@@ -475,18 +512,26 @@ action:
                     value_template: "{{ current_soc < t_morn_min | float }}"
                   - condition: template
                     value_template: "{{ current_price < p_max_cap | float }}"
-              # B. Buffer
-              - condition: template
-                value_template: "{{ current_price <= buffer_limit }}"
-              # C. Strict
-              - condition: template
-                value_template: "{{ current_price <= charge_limit_strict }}"
-          # Safety
-          - condition: template
-            value_template: "{{ current_soc < dynamic_target_soc | float }}"
-          - condition: template
-            value_template: "{{ current_price < p_max_cap | float }}"
+              # B. BUFFER
+              - condition: and
+                conditions:
+                  - condition: template
+                    value_template: "{{ is_in_slot }}"
+                  - condition: template
+                    value_template: "{{ current_price <= buffer_limit }}"
+                  - condition: template
+                    value_template: "{{ current_soc < dynamic_target_soc | float }}"
+              # C. STRICT
+              - condition: and
+                conditions:
+                  - condition: template
+                    value_template: "{{ is_in_slot }}"
+                  - condition: template
+                    value_template: "{{ current_price <= charge_limit_strict }}"
+                  - condition: template
+                    value_template: "{{ current_soc < dynamic_target_soc | float }}"
         sequence:
+          # 1. SET TARGET
           - if:
               - condition: template
                 value_template: "{{ (states(conf_target_num)|float(0) - dynamic_target_soc | float) | abs > 1 }}"
@@ -496,14 +541,20 @@ action:
                   entity_id: !input target_soc_number
                 data:
                   value: "{{ dynamic_target_soc }}"
+          
+          # 2. SWITCH ON
           - service: switch.turn_on
             target:
               entity_id: !input battery_reserve_switch
+          
+          # 3. STORE PRICE
           - service: input_number.set_value
             target:
               entity_id: !input last_price_helper
             data:
               value: "{{ current_price }}"
+          
+          # 4. NOTIFICATION
           - if:
               - condition: template
                 value_template: "{{ has_notify_device }}"
@@ -519,21 +570,17 @@ action:
                 message: >-
                   {% if language == 'nl' %}
                     🟢 Start Laden (€{{ current_price | round(3) }})
+                    Ref Piek: €{{ relevant_peak_price | round(3) }}
                   {% else %}
                     🟢 Start Charging (€{{ current_price | round(3) }})
+                    Ref Peak: €{{ relevant_peak_price | round(3) }}
                   {% endif %}
 
-      # --- 5. DISCHARGING ---
+      # --- PRIORITY 5: DISCHARGING ---
       - alias: "5. Discharging"
         conditions:
-          - condition: or
-            conditions:
-              # A. Price High
-              - condition: template
-                value_template: "{{ current_price >= discharge_start_price }}"
-              # B. Battery Full (Full Release v1.5.7 logic)
-              - condition: template
-                value_template: "{{ current_soc >= 90 }}"
+          - condition: template
+            value_template: "{{ current_price >= discharge_start_price }}"
         sequence:
           - service: switch.turn_off
             target:
@@ -549,15 +596,15 @@ action:
                 data:
                   value: "{{ p_min_base_soc | int }}"
 
-      # --- 6. HOLD ---
+      # --- PRIORITY 6: HOLD ---
       - alias: "6. Smart Hold"
         conditions:
+          - condition: template
+            value_template: "{{ is_in_slot }}"
           - condition: template
             value_template: "{{ current_price > charge_limit_strict }}"
           - condition: template
             value_template: "{{ current_price < discharge_start_price }}"
-          - condition: template
-            value_template: "{{ current_soc < 90 }}"
         sequence:
           - service: switch.turn_on
             target:
@@ -586,9 +633,13 @@ action:
                     device_id: !input notify_device
                     message: "{{ '🟡 Smart Hold' if language == 'nl' else '🟡 Smart Hold' }}"
 
-      # --- 7. FALLBACK ---
-      - alias: "7. Fallback"
-        conditions: []
+      # --- PRIORITY 7: STOP (DEFAULT) ---
+      - alias: "7. Stop / Default"
+        conditions:
+          - condition: template
+            value_template: "{{ not is_in_slot }}"
+          - condition: template
+            value_template: "{{ is_state(conf_switch, 'on') }}"
         sequence:
           - service: switch.turn_off
             target:
