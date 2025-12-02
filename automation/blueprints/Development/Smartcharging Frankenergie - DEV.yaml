@@ -488,16 +488,6 @@ action:
           - service: switch.turn_off
             target:
               entity_id: !input battery_reserve_switch
-          - if:
-              - condition: template
-                value_template: "{{ (states(conf_target_num)|float(0) - p_min_base_soc | float) | abs > 1 }}"
-            then:
-              - service: number.set_value
-                target:
-                  entity_id: !input target_soc_number
-                data:
-                  value: "{{ p_min_base_soc | int }}"
-
       # --- PRIORITY 6: SMART HOLD ---
       - alias: "6. Smart Hold"
         conditions:
