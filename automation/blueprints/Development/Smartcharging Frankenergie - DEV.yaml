@@ -1,5 +1,5 @@
 blueprint:
-  name: "Frank Energie - Smart Battery Manager v1.6.2.1 (Backup Soc)"
+  name: "Frank Energie - Smart Battery Manager v1.6.2.5 (Backup Soc)"
   description: >
     **Fix v1.6.1:**
     - Syntaxfout in 'default' actie opgelost.
@@ -414,14 +414,24 @@ action:
           - condition: template
             value_template: "{{ current_price < (p_max_cap | float * 1.5) }}"
         sequence:
-          - service: number.set_value
-            target:
-              entity_id: !input target_soc_number
-            data:
-              value: "{{ p_min_base_soc }}"
-          - service: switch.turn_on
-            target:
-              entity_id: !input battery_reserve_switch
+        # --- CHECK & SET SOC ---
+          - if:
+              - condition: template
+                # Check: Is het verschil tussen huidige instelling en wens groter dan 0.1?
+                value_template: "{{ (states(conf_target_num)|float(0) - dynamic_target_soc|float)|abs > 0.1 }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input target_soc_number
+                data:
+                  value: "{{ p_min_base_soc }}"
+          - if:
+              - condition: template
+                value_template: "{{ is_state(conf_switch, 'off') }}"
+            then:
+              - service: switch.turn_on
+                target:
+                  entity_id: !input battery_reserve_switch
           - service: input_number.set_value
             target:
               entity_id: !input last_price_helper
@@ -452,14 +462,24 @@ action:
                   - condition: template
                     value_template: "{{ current_price < p_max_cap | float }}"
         sequence:
-          - service: number.set_value
-            target:
-              entity_id: !input target_soc_number
-            data:
-              value: "{{ dynamic_target_soc }}"
-          - service: switch.turn_on
-            target:
-              entity_id: !input battery_reserve_switch
+              # --- CHECK & SET SOC ---
+          - if:
+              - condition: template
+                # Check: Is het verschil tussen huidige instelling en wens groter dan 0.1?
+                value_template: "{{ (states(conf_target_num)|float(0) - dynamic_target_soc|float)|abs > 0.5 }}"
+            then:
+              - service: number.set_value
+                target:
+                  entity_id: !input target_soc_number
+                data:
+                  value: "{{ dynamic_target_soc }}"
+          - if:
+              - condition: template
+                value_template: "{{ is_state(conf_switch, 'off') }}"
+            then:
+              - service: switch.turn_on
+                target:
+                  entity_id: !input battery_reserve_switch
           - service: input_number.set_value
             target:
               entity_id: !input last_price_helper
