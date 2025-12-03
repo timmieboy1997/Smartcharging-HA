@@ -1,0 +1,196 @@
+blueprint:
+  name: "Frank Energie - Price Based Learning Reserve"
+  description: >
+    Deze automatisering kijkt elke dag wat de 3 duurste uren zijn.
+    Het meet je verbruik tijdens die specifieke uren en past 's nachts 
+    automatisch je Batterij Reserve aan voor de volgende dag.
+  domain: automation
+  input:
+    # --- SENSOREN ---
+    house_consumption_sensor:
+      name: "Sensor: Huis Verbruik (Totaal)"
+      description: "Je hoofdmeter (kWh) die oploopt (P1 Import Totaal)."
+      selector:
+        entity:
+          domain: sensor
+          device_class: energy
+    frank_price_sensor:
+      name: "Sensor: Frank Energy Prices"
+      selector:
+        entity:
+          domain: sensor
+
+    # --- HELPERS ---
+    target_reserve_helper:
+      name: "Helper 1: Peak Reserve (Het Doel)"
+      description: "De helper die je ook in de Battery Manager gebruikt."
+      selector:
+        entity:
+          domain: input_number
+    
+    last_reading_helper:
+      name: "Helper 2: Meterstand Vorig Uur"
+      description: "Nieuwe helper om de meterstand van een uur geleden te onthouden."
+      selector:
+        entity:
+          domain: input_number
+
+    temp_daily_stack_helper:
+      name: "Helper 3: Dagverbruik Piek Temp"
+      description: "Nieuwe helper die gedurende de dag het verbruik in piekuren optelt."
+      selector:
+        entity:
+          domain: input_number
+
+    # --- INSTELLINGEN ---
+    peak_hours_count:
+      name: "Aantal Piekuren"
+      description: "Over hoeveel duurste uren moet het verbruik gemeten worden?"
+      default: 3
+      selector:
+        number:
+          min: 1
+          max: 6
+    
+    learning_rate:
+      name: "Leersnelheid (%)"
+      description: "Hoe snel moet de reserve aangepast worden? (Laag = stabiel, Hoog = reageert snel op verandering)."
+      default: 30
+      selector:
+        number:
+          min: 10
+          max: 100
+          unit_of_measurement: "%"
+
+    safety_margin:
+      name: "Veiligheidsmarge (%)"
+      description: "Extra reserve bovenop het gemeten verbruik."
+      default: 10
+      selector:
+        number:
+          min: 0
+          max: 50
+          unit_of_measurement: "%"
+
+trigger:
+  # Check elk uur om 59 minuten (zodat we het hele uur hebben gehad)
+  - platform: time_pattern
+    minutes: "59"
+    id: "hourly_check"
+  # Einde van de dag: Verwerken en leren
+  - platform: time
+    at: "23:59:00"
+    id: "end_of_day"
+
+action:
+  - variables:
+      consumption_sensor: !input house_consumption_sensor
+      price_sensor: !input frank_price_sensor
+      
+      # Helpers
+      h_reserve: !input target_reserve_helper
+      h_last_read: !input last_reading_helper
+      h_stack: !input temp_daily_stack_helper
+      
+      current_kwh: "{{ states(consumption_sensor) | float(0) }}"
+      last_kwh: "{{ states(h_last_read) | float(0) }}"
+      current_stack: "{{ states(h_stack) | float(0) }}"
+      
+      # Settings
+      p_count: !input peak_hours_count
+      p_learn: !input learning_rate
+      p_margin: !input safety_margin
+
+  - choose:
+      # --- TRIGGER 1: ELK UUR ---
+      - conditions:
+          - condition: trigger
+            id: "hourly_check"
+        sequence:
+          # 1. Bepaal of het afgelopen uur een piekuur was
+          - variables:
+              is_peak_hour: >-
+                {% set raw = state_attr(price_sensor, 'prices') %}
+                {% set now_ts = as_timestamp(now()) %}
+                {% set start_of_day = as_timestamp(now().replace(hour=0, minute=0, second=0)) %}
+                {% set end_of_day = start_of_day + 86400 %}
+                
+                {# Filter prijzen van VANDAAG #}
+                {% set today_prices = namespace(list=[]) %}
+                {% if raw %}
+                   {% set text = raw | string %}
+                   {% set matches = text | regex_findall("datetime\\.datetime\\((\\d+), (\\d+), (\\d+), (\\d+), (\\d+).*?price': ([0-9.]+)") %}
+                   {% for m in matches %}
+                      {% set y=m[0]|int %}{% set mo=m[1]|int %}{% set d=m[2]|int %}{% set h=m[3]|int %}{% set mn=m[4]|int %}{% set price=m[5]|float %}
+                      {% set ts = as_timestamp("%04d-%02d-%02dT%02d:%02d:00"|format(y,mo,d,h,mn)) %}
+                      {% if ts >= start_of_day and ts < end_of_day %}
+                         {% set today_prices.list = today_prices.list + [price] %}
+                      {% endif %}
+                   {% endfor %}
+                {% endif %}
+                
+                {# Bepaal drempelwaarde Top X #}
+                {% set sorted = today_prices.list | sort(reverse=True) %}
+                {% set threshold = 0 %}
+                {% if sorted | length >= p_count %}
+                   {% set threshold = sorted[p_count - 1] %}
+                {% endif %}
+                
+                {# Is huidige prijs (of afgelopen uur) hoog genoeg? #}
+                {{ states(price_sensor)|float(0) >= threshold }}
+
+          # 2. Als het een piekuur was: Verbruik toevoegen aan de stapel
+          - if:
+              - condition: template
+                value_template: "{{ is_peak_hour }}"
+              - condition: template
+                value_template: "{{ last_kwh > 0 }}" # Voorkom rare sprongen bij reboot
+            then:
+              - service: input_number.set_value
+                target:
+                  entity_id: !input temp_daily_stack_helper
+                data:
+                  value: "{{ current_stack + (current_kwh - last_kwh) }}"
+
+          # 3. Update meterstand voor volgend uur
+          - service: input_number.set_value
+            target:
+              entity_id: !input last_reading_helper
+            data:
+              value: "{{ current_kwh }}"
+
+      # --- TRIGGER 2: EINDE DAG (Leren) ---
+      - conditions:
+          - condition: trigger
+            id: "end_of_day"
+        sequence:
+          # 1. Bereken nieuwe gewogen waarde
+          - variables:
+              old_reserve: "{{ states(h_reserve) | float(4.0) }}"
+              measured_today: "{{ current_stack }}"
+              # Pas veiligheidsmarge toe op vandaag
+              measured_safe: "{{ measured_today * (1 + (p_margin / 100)) }}"
+              # Formule: (70% * Oud) + (30% * Nieuw)
+              new_reserve: "{{ (old_reserve * (1 - (p_learn/100))) + (measured_safe * (p_learn/100)) }}"
+          
+          # 2. Update de Hoofd Helper (Die de batterij aanstuurt)
+          - service: input_number.set_value
+            target:
+              entity_id: !input target_reserve_helper
+            data:
+              value: "{{ new_reserve | round(1) }}"
+          
+          # 3. Reset de dag-stapel voor morgen
+          - service: input_number.set_value
+            target:
+              entity_id: !input temp_daily_stack_helper
+            data:
+              value: 0
+            
+          # 4. Logboek berichtje
+          - service: logbook.log
+            data:
+              name: "Battery Learner"
+              message: "Piekverbruik vandaag: {{ measured_today | round(2) }} kWh. Nieuwe reserve: {{ new_reserve | round(1) }} kWh."
+
+mode: single
